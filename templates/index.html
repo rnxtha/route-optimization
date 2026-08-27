@@ -3,12 +3,14 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>RouteOpt - Kathmandu Valley Route Optimization</title>
-    <meta name="description" content="Intelligent route optimization system for Kathmandu Valley using A* and Dijkstra algorithms on real OpenStreetMap road data.">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>RouteOpt - Kathmandu Valley Navigation</title>
+    <meta name="description" content="Offline-capable navigation for Kathmandu Valley with turn-by-turn directions, A* and Dijkstra routing on OSM road data.">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <link href="https://unpkg.com/maplibre-gl@5/dist/maplibre-gl.css" rel="stylesheet" />
     <link rel="stylesheet" href="{% static 'css/styles.css' %}">
+    <link rel="manifest" href="{% static 'manifest.json' %}">
+    <meta name="theme-color" content="#0f111a">
 </head>
 <body>
 
@@ -18,220 +20,253 @@
             <div>
                 <h1>RouteOpt</h1>
             </div>
-            <div class="subtitle">Kathmandu Valley Intelligent Route Optimization</div>
+            <div class="subtitle">Kathmandu Valley Offline Navigation</div>
         </div>
         <div class="header-meta">
-            <i class="fa-solid fa-layer-group"></i>
-            Vector streets &middot; 3D buildings &middot; OSM live data
+            <span id="online-status" class="status-indicator online">
+                <i class="fa-solid fa-circle"></i> Online
+            </span>
         </div>
     </header>
 
     <div class="dashboard-container">
 
-        <aside class="sidebar">
+        <aside class="sidebar" id="sidebar">
 
-            <div class="sidebar-section">
-                <div class="section-title">
-                    <i class="fa-solid fa-map-location-dot"></i>
-                    <span>Route Planning</span>
-                </div>
+            <!-- Mode Tabs -->
+            <div class="mode-tabs" role="tablist">
+                <button role="tab" class="mode-tab active" data-mode="route" aria-selected="true">
+                    <i class="fa-solid fa-route"></i> Route
+                </button>
+                <button role="tab" class="mode-tab" data-mode="compare" aria-selected="false">
+                    <i class="fa-solid fa-chart-simple"></i> Compare
+                </button>
+                <button role="tab" class="mode-tab" data-mode="offline" aria-selected="false">
+                    <i class="fa-solid fa-download"></i> Offline Maps
+                </button>
+            </div>
 
-                <div class="instructions-card">
-                    <strong>How to plan a route</strong>
-                    <ul>
-                        <li>Type a place name or click the map to set start &amp; destination.</li>
-                        <li>Use the swap button to flip start/destination.</li>
-                        <li>Click <strong>Find Route</strong> to compare algorithms.</li>
-                    </ul>
-                </div>
+            <!-- ROUTE MODE PANEL -->
+            <div class="mode-panel active" id="panel-route" role="tabpanel">
 
-                <div class="location-inputs">
-                    <div class="input-field">
-                        <label for="start-input">Starting Point</label>
-                        <div class="input-field-wrapper start-border">
-                            <i class="fa-solid fa-circle-dot" style="color: #34a853;"></i>
-                            <input type="text" id="start-input" placeholder="Type a location (e.g. Thamel)" autocomplete="off">
-                            <button id="clear-start" type="button" class="input-clear-btn" style="display: none;"><i class="fa-solid fa-xmark"></i></button>
-                        </div>
-                        <div class="location-results" id="start-results"></div>
+                <div class="sidebar-section">
+                    <div class="section-title">
+                        <i class="fa-solid fa-map-location-dot"></i>
+                        <span>Route Planning</span>
                     </div>
 
-                    <button type="button" class="swap-btn" id="btn-swap" title="Swap start and destination">
-                        <i class="fa-solid fa-arrow-right-arrow-left"></i>
-                    </button>
+                    <div class="instructions-card">
+                        <strong>How to plan a route</strong>
+                        <ul>
+                            <li>Type a place name or click the map to set start & destination.</li>
+                            <li>Use the swap button to flip start/destination.</li>
+                            <li>Click <strong>Find Route</strong> to calculate.</li>
+                            <li>Click <strong>Start Navigation</strong> for turn-by-turn directions.</li>
+                        </ul>
+                    </div>
 
-                    <div class="input-field">
-                        <label for="end-input">Destination</label>
-                        <div class="input-field-wrapper end-border">
-                            <i class="fa-solid fa-location-dot" style="color: #ea4335;"></i>
-                            <input type="text" id="end-input" placeholder="Type a destination (e.g. Patan Durbar)" autocomplete="off">
-                            <button id="clear-end" type="button" class="input-clear-btn" style="display: none;"><i class="fa-solid fa-xmark"></i></button>
+                    <div class="location-inputs">
+                        <div class="input-field">
+                            <label for="start-input">Starting Point</label>
+                            <div class="input-field-wrapper start-border">
+                                <i class="fa-solid fa-circle-dot" style="color: #34a853;"></i>
+                                <input type="text" id="start-input" placeholder="Type a location (e.g. Thamel)" autocomplete="off">
+                                <button id="clear-start" type="button" class="input-clear-btn" style="display: none;"><i class="fa-solid fa-xmark"></i></button>
+                            </div>
+                            <div class="location-results" id="start-results"></div>
                         </div>
-                        <div class="location-results" id="end-results"></div>
+
+                        <button type="button" class="swap-btn" id="btn-swap" title="Swap start and destination">
+                            <i class="fa-solid fa-arrow-right-arrow-left"></i>
+                        </button>
+
+                        <div class="input-field">
+                            <label for="end-input">Destination</label>
+                            <div class="input-field-wrapper end-border">
+                                <i class="fa-solid fa-location-dot" style="color: #ea4335;"></i>
+                                <input type="text" id="end-input" placeholder="Type a destination (e.g. Patan Durbar)" autocomplete="off">
+                                <button id="clear-end" type="button" class="input-clear-btn" style="display: none;"><i class="fa-solid fa-xmark"></i></button>
+                            </div>
+                            <div class="location-results" id="end-results"></div>
+                        </div>
+                    </div>
+
+                    <div class="button-row">
+                        <button class="btn btn-primary" id="btn-calculate" disabled>
+                            <i class="fa-solid fa-route"></i> Find Route
+                        </button>
+                        <button class="btn btn-secondary" id="btn-reset">
+                            <i class="fa-solid fa-arrows-rotate"></i> Reset
+                        </button>
+                    </div>
+
+                    <div class="button-row" style="margin-top: 0.5rem;">
+                        <button class="btn btn-success" id="btn-navigate" disabled style="display: none;">
+                            <i class="fa-solid fa-location-arrow"></i> Start Navigation
+                        </button>
+                    </div>
+
+                    <div class="alert-box" id="error-alert">
+                        <i class="fa-solid fa-triangle-exclamation"></i>
+                        <span id="error-message"></span>
                     </div>
                 </div>
 
-                <div class="button-row">
-                    <button class="btn btn-primary" id="btn-calculate" disabled>
-                        <i class="fa-solid fa-route"></i> Find Route
-                    </button>
-                    <button class="btn btn-secondary" id="btn-reset">
-                        <i class="fa-solid fa-arrows-rotate"></i> Reset
-                    </button>
+                <div class="sidebar-section" id="route-results-section" style="display: none;">
+                    <div class="section-title">
+                        <i class="fa-solid fa-road"></i>
+                        <span>Route Summary</span>
+                    </div>
+
+                    <div class="route-summary-bar" id="route-summary-bar">
+                        <div class="summary-item">
+                            <i class="fa-solid fa-road"></i>
+                            <span id="summary-distance">-</span>
+                        </div>
+                        <div class="summary-item">
+                            <i class="fa-solid fa-clock"></i>
+                            <span id="summary-time">-</span>
+                        </div>
+                        <div class="summary-item">
+                            <i class="fa-solid fa-circle-nodes"></i>
+                            <span id="summary-nodes">-</span>
+                        </div>
+                    </div>
+
+                    <div class="route-toggle-group" id="route-toggle-group"></div>
+
+                    <div class="results-wrapper">
+                        <div class="algo-card astar" id="card-astar">
+                            <div class="card-header">
+                                <span class="algo-name">A* (Heuristic)</span>
+                                <span class="algo-tag">Fast Search</span>
+                            </div>
+                            <div class="grid-metrics">
+                                <div class="metric-item">
+                                    <div class="metric-label">Distance</div>
+                                    <div class="metric-value" id="astar-distance">-</div>
+                                </div>
+                                <div class="metric-item">
+                                    <div class="metric-label">Travel Time</div>
+                                    <div class="metric-value" id="astar-travel">-</div>
+                                </div>
+                                <div class="metric-item">
+                                    <div class="metric-label">Exec Time</div>
+                                    <div class="metric-value" id="astar-time">-</div>
+                                </div>
+                                <div class="metric-item">
+                                    <div class="metric-label">Nodes Explored</div>
+                                    <div class="metric-value" id="astar-nodes">-</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="algo-card dijkstra" id="card-dijkstra">
+                            <div class="card-header">
+                                <span class="algo-name">Dijkstra</span>
+                                <span class="algo-tag">Baseline</span>
+                            </div>
+                            <div class="grid-metrics">
+                                <div class="metric-item">
+                                    <div class="metric-label">Distance</div>
+                                    <div class="metric-value" id="dijkstra-distance">-</div>
+                                </div>
+                                <div class="metric-item">
+                                    <div class="metric-label">Travel Time</div>
+                                    <div class="metric-value" id="dijkstra-travel">-</div>
+                                </div>
+                                <div class="metric-item">
+                                    <div class="metric-label">Exec Time</div>
+                                    <div class="metric-value" id="dijkstra-time">-</div>
+                                </div>
+                                <div class="metric-item">
+                                    <div class="metric-label">Nodes Explored</div>
+                                    <div class="metric-value" id="dijkstra-nodes">-</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="chart-container">
+                            <canvas id="performance-chart"></canvas>
+                        </div>
+                    </div>
                 </div>
 
-                <div class="alert-box" id="error-alert">
-                    <i class="fa-solid fa-triangle-exclamation"></i>
-                    <span id="error-message"></span>
+            </div>
+
+            <!-- COMPARE MODE PANEL -->
+            <div class="mode-panel" id="panel-compare" role="tabpanel" style="display: none;">
+                <div class="sidebar-section">
+                    <div class="section-title">
+                        <i class="fa-solid fa-chart-simple"></i>
+                        <span>Algorithm Comparison</span>
+                    </div>
+                    <div class="comparison-explainer">
+                        <p style="font-size: 0.8rem; color: var(--text-secondary); line-height: 1.5;">
+                            Both algorithms find the <strong>shortest distance route</strong> using road distance as edge weight.
+                            A* uses a Haversine heuristic to explore fewer nodes, making it faster.
+                            Results should have identical distances on the same graph.
+                        </p>
+                    </div>
+                    <div id="comparison-results" style="display: none;">
+                        <div class="comparison-metric">
+                            <span class="comparison-label">Distance Match</span>
+                            <span class="comparison-value" id="cmp-distance-match">-</span>
+                        </div>
+                        <div class="comparison-metric">
+                            <span class="comparison-label">A* Nodes Explored</span>
+                            <span class="comparison-value" id="cmp-astar-nodes">-</span>
+                        </div>
+                        <div class="comparison-metric">
+                            <span class="comparison-label">Dijkstra Nodes Explored</span>
+                            <span class="comparison-value" id="cmp-dijkstra-nodes">-</span>
+                        </div>
+                        <div class="comparison-metric">
+                            <span class="comparison-label">A* Exec Time</span>
+                            <span class="comparison-value" id="cmp-astar-time">-</span>
+                        </div>
+                        <div class="comparison-metric">
+                            <span class="comparison-label">Dijkstra Exec Time</span>
+                            <span class="comparison-value" id="cmp-dijkstra-time">-</span>
+                        </div>
+                        <div class="comparison-metric">
+                            <span class="comparison-label">Speedup Factor</span>
+                            <span class="comparison-value" id="cmp-speedup">-</span>
+                        </div>
+                    </div>
                 </div>
             </div>
 
-            <div class="sidebar-section" id="results-section" style="display: none;">
-                <div class="section-title">
-                    <i class="fa-solid fa-chart-simple"></i>
-                    <span>Route Comparison</span>
-                </div>
-
-                <div class="route-summary-bar" id="route-summary-bar">
-                    <div class="summary-item">
-                        <i class="fa-solid fa-road"></i>
-                        <span id="summary-distance">-</span>
+            <!-- OFFLINE MAPS PANEL -->
+            <div class="mode-panel" id="panel-offline" role="tabpanel" style="display: none;">
+                <div class="sidebar-section">
+                    <div class="section-title">
+                        <i class="fa-solid fa-download"></i>
+                        <span>Offline Maps</span>
                     </div>
-                    <div class="summary-item">
-                        <i class="fa-solid fa-clock"></i>
-                        <span id="summary-time">-</span>
-                    </div>
-                    <div class="summary-item">
-                        <i class="fa-solid fa-circle-nodes"></i>
-                        <span id="summary-nodes">-</span>
-                    </div>
-                </div>
-
-                <div class="route-toggle-group" id="route-toggle-group"></div>
-
-                <div class="algorithm-explainer" id="algorithm-explainer" style="display:none;">
-                    <div class="section-title" style="font-size:0.8rem;margin-bottom:0.5rem;">
-                        <i class="fa-solid fa-microchip"></i>
-                        <span>How the algorithms work</span>
-                    </div>
-                    <div class="explainer-pill" style="border-left:3px solid #10b981;background:rgba(16,185,129,0.08);padding:0.5rem 0.65rem;border-radius:8px;margin-bottom:0.45rem;">
-                        <b style="color:#10b981;font-size:0.77rem;">🟢 A* ⭐ Optimal (RECOMMENDED)</b>
-                        <p style="font-size:0.7rem;color:#cdd5e1;margin:0.2rem 0 0 0;line-height:1.35;">
-                            Uses <b>heuristic (Haversine "as-the-crow-flies" to goal)</b> + ML traffic edge weights.
-                            Explores far fewer nodes than Dijkstra, guaranteed to find the
-                            <b>fastest route</b> avoiding predicted-congested roads.
-                        </p>
-                    </div>
-                    <div class="explainer-pill" style="border-left:3px solid #1d4ed8;background:rgba(29,78,216,0.08);padding:0.5rem 0.65rem;border-radius:8px;margin-bottom:0.45rem;">
-                        <b style="color:#1d4ed8;font-size:0.77rem;">🔵 Dijkstra Baseline</b>
-                        <p style="font-size:0.7rem;color:#cdd5e1;margin:0.2rem 0 0 0;line-height:1.35;">
-                            Expands equally in <b>all directions</b> from start using distance-only weights.
-                            Guarantees the <b>shortest geometric path</b>, but ignores traffic —
-                            often takes you straight through crowded city roads.
-                        </p>
-                    </div>
-                    <div class="explainer-pill" style="border-left:3px solid #f97316;background:rgba(249,115,22,0.08);padding:0.5rem 0.65rem;border-radius:8px;">
-                        <b style="color:#f97316;font-size:0.77rem;">🧠 ML Traffic Predictor</b>
-                        <p style="font-size:0.7rem;color:#cdd5e1;margin:0.2rem 0 0 0;line-height:1.35;">
-                            Every edge is scored by an ML model using <b>road class, time-of-day rush
-                            windows, intersections/lane count, stable per-road historic effect</b>,
-                            and stop-sign delay → produces predicted minutes + congestion level.
-                        </p>
-                    </div>
-                </div>
-
-                <div class="comparison-card" id="comparison-card" style="display: none;">
-                    <div class="comparison-header">
-                        <i class="fa-solid fa-lightbulb"></i>
-                        <span class="comparison-title">ML-Optimized Route Analysis</span>
-                    </div>
-                    <div class="comparison-recommendation" id="comparison-recommendation">-</div>
-                    <div class="comparison-deltas">
-                        <div class="delta-item">
-                            <div class="delta-label">Time Difference</div>
-                            <div class="delta-value" id="delta-time">-</div>
+                    <div class="offline-status-card">
+                        <div class="offline-status-header">
+                            <i class="fa-solid fa-database"></i>
+                            <span>Storage Status</span>
                         </div>
-                        <div class="delta-item">
-                            <div class="delta-label">Distance Difference</div>
-                            <div class="delta-value" id="delta-distance">-</div>
+                        <div class="offline-storage-bar">
+                            <div class="storage-bar-fill" id="storage-bar-fill"></div>
                         </div>
-                        <div class="delta-item">
-                            <div class="delta-label">Baseline Congested</div>
-                            <div class="delta-value" id="delta-baseline-cong">-</div>
-                        </div>
-                        <div class="delta-item">
-                            <div class="delta-label">Optimized Congested</div>
-                            <div class="delta-value" id="delta-optimized-cong">-</div>
-                        </div>
-                    </div>
-                    <ul class="comparison-reasons" id="comparison-reasons"></ul>
-                    <div class="congestion-distribution" id="congestion-distribution"></div>
-                </div>
-
-                <div class="results-wrapper">
-
-                    <div class="algo-card astar" id="card-astar" style="position:relative;overflow:visible;">
-                        <div class="card-header">
-                            <span class="algo-name">A* · 🏆 <b>OPTIMAL PATH</b></span>
-                            <span class="ml-badge" style="background:rgba(16,185,129,0.12);border:1px solid rgba(16,185,129,0.35);color:#10b981;"><i class="fa-solid fa-brain"></i> ML Weights</span>
-                        </div>
-                        <div class="grid-metrics">
-                            <div class="metric-item">
-                                <div class="metric-label">Distance</div>
-                                <div class="metric-value" id="astar-distance">-</div>
-                            </div>
-                            <div class="metric-item">
-                                <div class="metric-label">Travel Time</div>
-                                <div class="metric-value" id="astar-travel" style="color:#10b981;">-</div>
-                            </div>
-                            <div class="metric-item">
-                                <div class="metric-label">Exec Time</div>
-                                <div class="metric-value" id="astar-time">-</div>
-                            </div>
-                            <div class="metric-item">
-                                <div class="metric-label">Nodes Explored</div>
-                                <div class="metric-value" id="astar-nodes">-</div>
-                            </div>
-                            <div class="metric-item" style="grid-column: span 2;">
-                                <div class="metric-label">Dominant Congestion</div>
-                                <div class="metric-value" id="astar-congestion" style="font-size: 0.9rem;">-</div>
-                            </div>
-                        </div>
+                        <div class="storage-info" id="storage-info">Calculating...</div>
                     </div>
 
-                    <div class="algo-card dijkstra" id="card-dijkstra">
-                        <div class="card-header">
-                            <span class="algo-name">Dijkstra · Baseline</span>
-                            <span class="algo-tag">Distance Only</span>
-                        </div>
-                        <div class="grid-metrics">
-                            <div class="metric-item">
-                                <div class="metric-label">Distance</div>
-                                <div class="metric-value" id="dijkstra-distance">-</div>
-                            </div>
-                            <div class="metric-item">
-                                <div class="metric-label">Travel Time</div>
-                                <div class="metric-value" id="dijkstra-travel">-</div>
-                            </div>
-                            <div class="metric-item">
-                                <div class="metric-label">Exec Time</div>
-                                <div class="metric-value" id="dijkstra-time">-</div>
-                            </div>
-                            <div class="metric-item">
-                                <div class="metric-label">Nodes Explored</div>
-                                <div class="metric-value" id="dijkstra-nodes">-</div>
-                            </div>
-                            <div class="metric-item" style="grid-column: span 2;">
-                                <div class="metric-label">Dominant Congestion</div>
-                                <div class="metric-value" id="dijkstra-congestion" style="font-size: 0.9rem;">-</div>
-                            </div>
-                        </div>
+                    <div class="offline-actions">
+                        <button class="btn btn-primary" id="btn-download-region">
+                            <i class="fa-solid fa-download"></i> Download Current View
+                        </button>
+                        <button class="btn btn-secondary" id="btn-use-offline" disabled>
+                            <i class="fa-solid fa-toggle-on"></i> Use Offline Mode
+                        </button>
                     </div>
 
-                    <div class="chart-container">
-                        <canvas id="performance-chart"></canvas>
+                    <div class="offline-regions-list" id="offline-regions-list">
+                        <div class="offline-empty">No offline regions downloaded yet.</div>
                     </div>
-
                 </div>
             </div>
 
@@ -273,22 +308,22 @@
             </div>
 
             <div class="map-legend-card" id="map-legend-card">
-                <div class="legend-title">Legend</div>
+                <div class="legend-title">Routes</div>
                 <div class="legend-item">
-                    <div class="legend-color" style="background: #10b981; border: 2px solid #fff; box-shadow: 0 0 0 2px #10b98155;"></div>
-                    <span><b>A* ⭐ RECOMMENDED</b><small style="display:block;opacity:.6;">Fastest, ML avoids traffic</small></span>
+                    <div class="legend-color" style="background: #10b981;"></div>
+                    <span>A* (Heuristic)</span>
                 </div>
                 <div class="legend-item">
                     <div class="legend-color" style="background: #1d4ed8;"></div>
-                    <span>Dijkstra Baseline<small style="display:block;opacity:.6;">Shortest distance only</small></span>
+                    <span>Dijkstra</span>
                 </div>
                 <div class="legend-item" id="legend-alt1" style="display:none;">
                     <div class="legend-color" style="background: #f97316; background-image: repeating-linear-gradient(90deg, transparent 0 6px, rgba(255,255,255,0.4) 6px 9px);"></div>
-                    <span>Alternative 1<small style="display:block;opacity:.6;">Longer scenic option</small></span>
+                    <span>Alternative 1</span>
                 </div>
                 <div class="legend-item" id="legend-alt2" style="display:none;">
                     <div class="legend-color" style="background: #ec4899; background-image: repeating-linear-gradient(90deg, transparent 0 4px, rgba(255,255,255,0.4) 4px 8px);"></div>
-                    <span>Alternative 2<small style="display:block;opacity:.6;">Another optional route</small></span>
+                    <span>Alternative 2</span>
                 </div>
             </div>
 
@@ -299,6 +334,56 @@
                     <button id="close-route-info" type="button" class="info-close-btn"><i class="fa-solid fa-xmark"></i></button>
                 </div>
                 <div class="route-info-body" id="route-info-body"></div>
+            </div>
+
+            <!-- NAVIGATION PANEL -->
+            <div class="navigation-panel" id="navigation-panel" hidden>
+                <div class="nav-header">
+                    <div class="nav-title-row">
+                        <i class="fa-solid fa-location-arrow nav-icon"></i>
+                        <div class="nav-text">
+                            <div class="nav-title">Navigation</div>
+                            <div class="nav-subtitle" id="nav-subtitle">Starting...</div>
+                        </div>
+                    </div>
+                    <button id="btn-stop-nav" class="btn-stop-nav" title="Stop Navigation">
+                        <i class="fa-solid fa-stop"></i>
+                    </button>
+                </div>
+
+                <div class="nav-current-step" id="nav-current-step">
+                    <div class="nav-maneuver" id="nav-maneuver">
+                        <i class="fa-solid fa-arrow-up"></i>
+                    </div>
+                    <div class="nav-instruction" id="nav-instruction">Calculating route...</div>
+                    <div class="nav-distance" id="nav-distance">0 m</div>
+                </div>
+
+                <div class="nav-progress" id="nav-progress">
+                    <div class="nav-progress-bar">
+                        <div class="nav-progress-fill" id="nav-progress-fill"></div>
+                    </div>
+                    <div class="nav-progress-text">
+                        <span id="nav-progress-current">0%</span> / <span id="nav-progress-total">100%</span>
+                    </div>
+                </div>
+
+                <div class="nav-eta" id="nav-eta">
+                    <div class="eta-item">
+                        <span class="eta-label">Remaining</span>
+                        <span class="eta-value" id="eta-remaining">-</span>
+                    </div>
+                    <div class="eta-item">
+                        <span class="eta-label">Distance</span>
+                        <span class="eta-value" id="eta-distance">-</span>
+                    </div>
+                    <div class="eta-item">
+                        <span class="eta-label">Arrival</span>
+                        <span class="eta-value" id="eta-arrival">-</span>
+                    </div>
+                </div>
+
+                <div class="nav-steps-list" id="nav-steps-list"></div>
             </div>
 
             <div class="loading-overlay" id="loading-overlay">
