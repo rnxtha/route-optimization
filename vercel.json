@@ -1,12 +1,7 @@
 {
   "buildCommand": "pip install -r requirements.txt && python manage.py collectstatic --noinput",
-  "outputDirectory": "staticfiles",
+  "outputDirectory": ".",
   "env": {
     "PYTHON_VERSION": "3.10"
-  },
-  "functions": {
-    "routing/wsgi.py": {
-      "runtime": "python3.10"
-    }
   }
 }
