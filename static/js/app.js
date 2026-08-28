@@ -337,6 +337,51 @@ document.addEventListener('DOMContentLoaded', () => {
     let navRoadNames = [];
     let currentPosMarker = null;
     let navTotalDistance = 0;
+    let currentLocation = null;
+    let locationAccuracyCircle = null;
+    let isFollowingLocation = true;
+    let previousGpsPosition = null;
+    let navRerouteInFlight = false;
+    let lastRerouteAt = 0;
+    const OFF_ROUTE_THRESHOLD_METERS = 60;
+    const REROUTE_COOLDOWN_MS = 15000;
+
+    function updateLocationMarker(lat, lon, accuracy = 0) {
+        if (!currentPosMarker) {
+            const el = document.createElement('div');
+            el.className = 'gps-dot';
+            el.innerHTML = '<div class="gps-dot-inner"></div><div class="gps-dot-pulse"></div>';
+            currentPosMarker = new maplibregl.Marker({ element: el, anchor: 'center' }).setLngLat([lon, lat]).addTo(map);
+        } else {
+            currentPosMarker.setLngLat([lon, lat]);
+        }
+        const source = map.getSource('location-accuracy');
+        if (source) {
+            const radius = Math.min(Math.max(accuracy || 25, 15), 300);
+            const points = [];
+            for (let i = 0; i <= 64; i++) {
+                const angle = (i / 64) * Math.PI * 2;
+                const latOffset = (radius / 111320) * Math.sin(angle);
+                const lonOffset = (radius / (111320 * Math.cos(lat * Math.PI / 180))) * Math.cos(angle);
+                points.push([lon + lonOffset, lat + latOffset]);
+            }
+            source.setData({ type: 'Feature', geometry: { type: 'Polygon', coordinates: [points] } });
+        }
+    }
+
+    function updateLocationLayers() {
+        if (!map.getSource('location-accuracy')) {
+            map.addSource('location-accuracy', { type: 'geojson', data: emptyLine() });
+            map.addLayer({ id: 'location-accuracy-fill', type: 'fill', source: 'location-accuracy', paint: { 'fill-color': '#3b82f6', 'fill-opacity': 0.12 } });
+            map.addLayer({ id: 'location-accuracy-line', type: 'line', source: 'location-accuracy', paint: { 'line-color': '#3b82f6', 'line-opacity': 0.35, 'line-width': 1 } });
+        }
+    }
+
+    function centerOnLocation(lat, lon, heading = null, duration = 700) {
+        const camera = { center: [lon, lat], zoom: Math.max(map.getZoom(), 16), pitch: is3D ? 58 : 0, duration };
+        if (Number.isFinite(heading) && heading >= 0) camera.bearing = heading;
+        map.easeTo(camera);
+    }
 
     function renderNavSteps() {
         const list = document.getElementById('nav-steps-list');
@@ -376,9 +421,73 @@ document.addEventListener('DOMContentLoaded', () => {
 
         renderNavSteps();
         // highlight on map: pan to current step
-        if (cur.coord) {
+        if (cur.coord && (!document.body.classList.contains('navigating') || !currentLocation)) {
             map.easeTo({ center: [cur.coord[1], cur.coord[0]], zoom: Math.max(map.getZoom(), 16), pitch: 50, duration: 800 });
         }
+    }
+
+    function nearestPointOnPath(lat, lon, path) {
+        if (!path || path.length === 0) return null;
+        const cosLat = Math.cos(lat * Math.PI / 180);
+        let best = null;
+        for (let i = 0; i < path.length - 1; i++) {
+            const ax = (path[i][1] - lon) * cosLat;
+            const ay = path[i][0] - lat;
+            const bx = (path[i + 1][1] - lon) * cosLat;
+            const by = path[i + 1][0] - lat;
+            const dx = bx - ax, dy = by - ay;
+            const fraction = Math.max(0, Math.min(1, (-(ax * dx + ay * dy)) / Math.max(1e-12, dx * dx + dy * dy)));
+            const pointLat = path[i][0] + (path[i + 1][0] - path[i][0]) * fraction;
+            const pointLon = path[i][1] + (path[i + 1][1] - path[i][1]) * fraction;
+            const distance = haversineMeters(lat, lon, pointLat, pointLon);
+            if (!best || distance < best.distance) best = { lat: pointLat, lon: pointLon, distance, index: i };
+        }
+        return best || { lat: path[0][0], lon: path[0][1], distance: haversineMeters(lat, lon, path[0][0], path[0][1]), index: 0 };
+    }
+
+    async function rerouteFromLocation(lat, lon) {
+        if (!endLngLat || navRerouteInFlight) return;
+        navRerouteInFlight = true;
+        lastRerouteAt = Date.now();
+        document.getElementById('nav-subtitle').textContent = 'Off route · recalculating...';
+        try {
+            let data;
+            if (useOfflineRouting || !navigator.onLine) {
+                data = await offlineRoute(lat, lon, endLngLat.lat, endLngLat.lng);
+            } else {
+                const response = await fetch('/api/route/', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ start_lat: lat, start_lon: lon, end_lat: endLngLat.lat, end_lon: endLngLat.lng })
+                });
+                if (!response.ok) throw new Error('Route recalculation failed.');
+                const payload = await response.json();
+                if (!payload.success) throw new Error(payload.error || 'Route recalculation failed.');
+                data = payload.data;
+            }
+            if (!data.astar || !data.astar.path || data.astar.path.length < 2) throw new Error('No replacement route found.');
+            renderRouteResult(data);
+            routeInfoPanel.hidden = true;
+            navPath = data.astar.path;
+            navRoadNames = data.astar.road_names || [];
+            navSteps = generateNavigationSteps(navPath, navRoadNames);
+            navCurrentIdx = 0;
+            navTotalDistance = navSteps.reduce((total, step) => total + step.distanceM, 0);
+            updateNavPanel();
+            document.getElementById('nav-subtitle').textContent = 'Route updated · GPS active';
+        } catch (error) {
+            document.getElementById('nav-subtitle').textContent = 'Off route · unable to recalculate';
+            showError(error.message);
+        } finally {
+            navRerouteInFlight = false;
+        }
+    }
+
+    function checkOffRoute(lat, lon) {
+        const nearest = nearestPointOnPath(lat, lon, navPath);
+        if (!nearest || !currentLocation || currentLocation.accuracy > 100) return;
+        const threshold = Math.max(OFF_ROUTE_THRESHOLD_METERS, currentLocation.accuracy * 1.5);
+        if (nearest.distance > threshold && Date.now() - lastRerouteAt > REROUTE_COOLDOWN_MS) rerouteFromLocation(lat, lon);
     }
 
     function startNavigation() {
@@ -393,11 +502,15 @@ document.addEventListener('DOMContentLoaded', () => {
         navTotalDistance = navSteps.reduce((a,s)=>a+s.distanceM,0);
         navigationPanel.hidden = false;
         document.body.classList.add('navigating');
+        isFollowingLocation = true;
         updateNavPanel();
 
         // Try real GPS
         if ('geolocation' in navigator) {
             document.getElementById('nav-subtitle').textContent = 'Waiting for GPS...';
+            navigator.geolocation.getCurrentPosition(onGpsUpdate, onGpsError, {
+                enableHighAccuracy: true, maximumAge: 10000, timeout: 15000
+            });
             navWatchId = navigator.geolocation.watchPosition(
                 onGpsUpdate,
                 onGpsError,
@@ -417,14 +530,16 @@ document.addEventListener('DOMContentLoaded', () => {
     function onGpsUpdate(pos) {
         const lat = pos.coords.latitude, lon = pos.coords.longitude;
         if (!inBounds(lat, lon)) return; // ignore outside valley
-        if (!currentPosMarker) {
-            const el = document.createElement('div');
-            el.className = 'gps-dot';
-            el.innerHTML = '<div class="gps-dot-inner"></div><div class="gps-dot-pulse"></div>';
-            currentPosMarker = new maplibregl.Marker({ element: el, anchor: 'center' }).setLngLat([lon, lat]).addTo(map);
-        } else {
-            currentPosMarker.setLngLat([lon, lat]);
+        let heading = Number.isFinite(pos.coords.heading) && pos.coords.heading >= 0 ? pos.coords.heading : null;
+        if (heading === null && previousGpsPosition) {
+            const moved = haversineMeters(previousGpsPosition.lat, previousGpsPosition.lon, lat, lon);
+            if (moved >= 3) heading = bearingDeg(previousGpsPosition.lat, previousGpsPosition.lon, lat, lon);
         }
+        previousGpsPosition = { lat, lon };
+        currentLocation = { lat, lon, accuracy: pos.coords.accuracy };
+        updateLocationMarker(lat, lon, pos.coords.accuracy);
+        document.getElementById('nav-subtitle').textContent = `GPS active · ±${Math.round(pos.coords.accuracy)} m`;
+        checkOffRoute(lat, lon);
         // advance step if close to next maneuver
         if (navCurrentIdx < navSteps.length - 1) {
             const next = navSteps[navCurrentIdx + 1];
@@ -437,8 +552,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             }
         }
-        // also auto-center map on GPS when navigating
-        map.easeTo({ center: [lon, lat], duration: 1000 });
+        // Keep the camera attached to the user, like a turn-by-turn map.
+        if (isFollowingLocation) centerOnLocation(lat, lon, heading, 1000);
     }
 
     function onGpsError(err) {
@@ -453,6 +568,9 @@ document.addEventListener('DOMContentLoaded', () => {
     function stopNavigation() {
         if (navWatchId !== null) { navigator.geolocation.clearWatch(navWatchId); navWatchId = null; }
         if (currentPosMarker) { currentPosMarker.remove(); currentPosMarker = null; }
+        currentLocation = null;
+        previousGpsPosition = null;
+        if (map.getSource('location-accuracy')) map.getSource('location-accuracy').setData(emptyLine());
         navigationPanel.hidden = true;
         document.body.classList.remove('navigating');
         navSteps = []; navCurrentIdx = 0;
@@ -521,6 +639,34 @@ document.addEventListener('DOMContentLoaded', () => {
             req.onsuccess = () => res(req.result ? req.result.data : null);
             req.onerror = () => rej(req.error);
         });
+    }
+
+    function tileCoordinate(value, zoom) {
+        return Math.floor((value + 180) / 360 * Math.pow(2, zoom));
+    }
+    function tileY(lat, zoom) {
+        const radians = lat * Math.PI / 180;
+        return Math.floor((1 - Math.asinh(Math.tan(radians)) / Math.PI) / 2 * Math.pow(2, zoom));
+    }
+    async function cacheCurrentMapView(bounds, zoom) {
+        if (!navigator.serviceWorker) return 0;
+        const registration = await navigator.serviceWorker.ready;
+        const worker = navigator.serviceWorker.controller || registration.active;
+        if (!worker) return 0;
+        const sources = map.getStyle()?.sources || {};
+        const templates = [];
+        Object.values(sources).forEach(source => (source.tiles || []).forEach(tile => templates.push(tile)));
+        if (currentStyle === 'satellite') templates.push(...SATELLITE_STYLE.sources.esri.tiles, ...SATELLITE_STYLE.sources.roads.tiles, ...SATELLITE_STYLE.sources.places.tiles);
+        const urls = new Set();
+        for (const level of [Math.max(11, zoom - 1), zoom, Math.min(19, zoom + 1)]) {
+            const minX = tileCoordinate(bounds.west, level), maxX = tileCoordinate(bounds.east, level);
+            const minY = tileY(bounds.north, level), maxY = tileY(bounds.south, level);
+            for (let x = minX; x <= maxX; x++) for (let y = minY; y <= maxY; y++) {
+                templates.forEach(template => urls.add(template.replace('{z}', level).replace('{x}', x).replace('{y}', y)));
+            }
+        }
+        worker.postMessage({ type: 'CACHE_URLS', urls: [...urls].slice(0, 500) });
+        return Math.min(urls.size, 500);
     }
 
     // JS implementations for offline routing
@@ -769,11 +915,12 @@ document.addEventListener('DOMContentLoaded', () => {
             const id = 'region-'+Date.now();
             await saveRegion({ id, name, bounds, boundsText: `${bounds.west.toFixed(2)}°W → ${bounds.east.toFixed(2)}°E, ${bounds.south.toFixed(2)}°S → ${bounds.north.toFixed(2)}°N`, sizeMB, savedAt: Date.now() });
             await saveGraph(id, graph);
+            const tileCount = await cacheCurrentMapView(bounds, zoom);
             loadingOverlay.classList.remove('active');
             showError(''); hideError();
             // show success as transient
             const msg = document.createElement('div');
-            msg.className='offline-toast'; msg.innerHTML='<i class="fa-solid fa-check"></i> Offline region saved ('+sizeMB+' MB)';
+            msg.className='offline-toast'; msg.innerHTML='<i class="fa-solid fa-check"></i> Offline region saved ('+sizeMB+' MB, '+tileCount+' map tiles)';
             document.body.appendChild(msg);
             setTimeout(()=>msg.remove(),3000);
             refreshOfflineUI();
@@ -834,8 +981,8 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // ==================== MAP EVENTS ====================
-    map.on('load', () => { ensureRouteLayers(); try { map.setSky({ 'sky-color': '#87b8e8', 'horizon-color': '#f4efe6', 'fog-color': '#f4efe6', 'fog-ground-blend': 0.35 }); } catch {} });
-    map.on('style.load', () => { routeLayersReady = false; ensureRouteLayers(); if (lastRouteData) drawRoutesOnMap(lastRouteData); });
+    map.on('load', () => { ensureRouteLayers(); updateLocationLayers(); try { map.setSky({ 'sky-color': '#87b8e8', 'horizon-color': '#f4efe6', 'fog-color': '#f4efe6', 'fog-ground-blend': 0.35 }); } catch {} });
+    map.on('style.load', () => { routeLayersReady = false; ensureRouteLayers(); updateLocationLayers(); if (lastRouteData) drawRoutesOnMap(lastRouteData); });
     map.on('click', e => {
         if (navigationPanel.hidden === false) return; // don't place pins while navigating
         if (e.originalEvent.target.closest('.gpin, .map-style-switcher, .map-fabs, .map-legend-card, .route-info-panel, .maplibregl-ctrl, .navigation-panel')) return;
@@ -865,14 +1012,18 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     document.getElementById('btn-locate').addEventListener('click', () => {
         if (!navigator.geolocation) { showError('Geolocation is not supported.'); return; }
+        isFollowingLocation = true;
         navigator.geolocation.getCurrentPosition(pos => {
             const { latitude: lat, longitude: lng } = pos.coords;
             if (!inBounds(lat, lng)) { showError('Your location is outside the Kathmandu Valley study area.'); return; }
-            map.flyTo({ center: [lng, lat], zoom: 16, pitch: is3D ? 58 : 0, duration: 1000 });
+            currentLocation = { lat, lon: lng, accuracy: pos.coords.accuracy };
+            updateLocationMarker(lat, lng, pos.coords.accuracy);
+            centerOnLocation(lat, lng, pos.coords.heading, 1000);
             if (!startMarker) setStart(lat, lng, false);
             else if (!endMarker) setEnd(lat, lng, false);
-        }, () => showError('Could not read your location. Allow location access and try again.'));
+        }, err => showError(err.code === 1 ? 'Location permission denied. Allow location access and try again.' : 'Could not read your location. Try again.'), { enableHighAccuracy: true, maximumAge: 10000, timeout: 15000 });
     });
+    map.on('dragstart', () => { if (navigationPanel.hidden === false) isFollowingLocation = false; });
     btnReset.addEventListener('click', () => { resetRouting(); map.flyTo({ center: CENTER, zoom: DEFAULT_ZOOM, pitch: is3D ? DEFAULT_PITCH : 0, bearing: is3D ? DEFAULT_BEARING : 0, duration: 900 }); });
     btnSwap.addEventListener('click', () => {
         if (!startLngLat || !endLngLat) return;
@@ -886,6 +1037,8 @@ document.addEventListener('DOMContentLoaded', () => {
     closeRouteInfo.addEventListener('click', () => { routeInfoPanel.hidden = true; });
     document.getElementById('btn-stop-nav').addEventListener('click', stopNavigation);
     btnNavigate.addEventListener('click', startNavigation);
+
+    if ('serviceWorker' in navigator) navigator.serviceWorker.register('/static/sw.js?v=3').catch(err => console.warn('Offline cache unavailable', err));
     document.getElementById('card-astar').addEventListener('click', () => { if (lastRouteData && lastRouteData.astar) showRouteInfo('astar', lastRouteData.astar); });
     document.getElementById('card-dijkstra').addEventListener('click', () => { if (lastRouteData && lastRouteData.dijkstra) showRouteInfo('dijkstra', lastRouteData.dijkstra); });
     document.getElementById('card-astar').style.cursor = 'pointer';
