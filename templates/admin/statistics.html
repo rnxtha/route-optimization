@@ -1,0 +1,285 @@
+{% extends "admin/base.html" %}
+
+{% block title %}Statistics - Admin Panel{% endblock %}
+{% block page_title %}📈 Route/Algorithm Statistics{% endblock %}
+
+{% block content %}
+<div class="row mb-4">
+    <div class="col-md-12">
+        <div class="card">
+            <div class="card-header" style="background-color: #3498db; color: white;">
+                <h5 style="margin: 0;">Performance Comparison (Last 7 Days)</h5>
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-6">
+                        <div class="card stat-card">
+                            <div class="card-body">
+                                <h5 class="card-title">🔵 Dijkstra Algorithm</h5>
+                                <table class="table table-sm">
+                                    <tr>
+                                        <td><strong>Routes Calculated:</strong></td>
+                                        <td>{{ dijkstra_summary.count }}</td>
+                                    </tr>
+                                    <tr>
+                                        <td><strong>Avg Execution Time:</strong></td>
+                                        <td><span class="badge bg-info">{{ dijkstra_summary.avg_time_ms|floatformat:2 }} ms</span></td>
+                                    </tr>
+                                    <tr>
+                                        <td><strong>Min Time:</strong></td>
+                                        <td>{{ dijkstra_summary.min_time_ms|floatformat:2 }} ms</td>
+                                    </tr>
+                                    <tr>
+                                        <td><strong>Max Time:</strong></td>
+                                        <td>{{ dijkstra_summary.max_time_ms|floatformat:2 }} ms</td>
+                                    </tr>
+                                    <tr>
+                                        <td><strong>Avg Distance:</strong></td>
+                                        <td>{{ dijkstra_summary.avg_distance|floatformat:0 }} m</td>
+                                    </tr>
+                                    <tr>
+                                        <td><strong>Avg Nodes Explored:</strong></td>
+                                        <td>{{ dijkstra_summary.avg_nodes_explored|floatformat:0 }}</td>
+                                    </tr>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="col-md-6">
+                        <div class="card stat-card warning">
+                            <div class="card-body">
+                                <h5 class="card-title">⭐ A* Algorithm</h5>
+                                <table class="table table-sm">
+                                    <tr>
+                                        <td><strong>Routes Calculated:</strong></td>
+                                        <td>{{ astar_summary.count }}</td>
+                                    </tr>
+                                    <tr>
+                                        <td><strong>Avg Execution Time:</strong></td>
+                                        <td><span class="badge bg-warning">{{ astar_summary.avg_time_ms|floatformat:2 }} ms</span></td>
+                                    </tr>
+                                    <tr>
+                                        <td><strong>Min Time:</strong></td>
+                                        <td>{{ astar_summary.min_time_ms|floatformat:2 }} ms</td>
+                                    </tr>
+                                    <tr>
+                                        <td><strong>Max Time:</strong></td>
+                                        <td>{{ astar_summary.max_time_ms|floatformat:2 }} ms</td>
+                                    </tr>
+                                    <tr>
+                                        <td><strong>Avg Distance:</strong></td>
+                                        <td>{{ astar_summary.avg_distance|floatformat:0 }} m</td>
+                                    </tr>
+                                    <tr>
+                                        <td><strong>Avg Nodes Explored:</strong></td>
+                                        <td>{{ astar_summary.avg_nodes_explored|floatformat:0 }}</td>
+                                    </tr>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                {% if astar_summary.avg_time_ms > 0 and dijkstra_summary.avg_time_ms > 0 %}
+                <div class="row mt-3">
+                    <div class="col-md-12">
+                        <div class="alert alert-info" role="alert">
+                            <strong>Performance Analysis:</strong>
+                            {% if faster_algorithm %}
+                                {{ faster_algorithm }} is <strong>{{ performance_ratio|floatformat:2 }}x faster</strong> than {% if faster_algorithm == 'A*' %}Dijkstra{% else %}A*{% endif %} on average
+                            {% else %}
+                                Both algorithms have similar average execution times
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header" style="background-color: #2ecc71; color: white;">
+                <h5 style="margin: 0;">Execution Time Trend</h5>
+            </div>
+            <div class="card-body">
+                <canvas id="executionTimeChart"></canvas>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header" style="background-color: #2ecc71; color: white;">
+                <h5 style="margin: 0;">Nodes Explored Trend</h5>
+            </div>
+            <div class="card-body">
+                <canvas id="nodesExploredChart"></canvas>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row mt-4">
+    <div class="col-md-12">
+        <div class="card">
+            <div class="card-header" style="background-color: #3498db; color: white;">
+                <h5 style="margin: 0;">Recent Route Calculations (Last 100)</h5>
+            </div>
+            <div class="card-body">
+                <div class="table-responsive">
+                    <table class="table table-hover table-sm">
+                        <thead class="table-light">
+                            <tr>
+                                <th>Algorithm</th>
+                                <th>Execution Time</th>
+                                <th>Distance</th>
+                                <th>Nodes Explored</th>
+                                <th>Path Length</th>
+                                <th>Timestamp</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for stat in recent_stats %}
+                            <tr>
+                                <td>
+                                    {% if stat.algorithm == 'dijkstra' %}
+                                        <span class="badge bg-info">Dijkstra</span>
+                                    {% else %}
+                                        <span class="badge bg-warning">A*</span>
+                                    {% endif %}
+                                </td>
+                                <td>
+                                    <span class="badge bg-light text-dark">{{ stat.execution_time_ms|floatformat:2 }} ms</span>
+                                </td>
+                                <td>{{ stat.distance_meters|floatformat:0 }} m</td>
+                                <td>{{ stat.nodes_explored }}</td>
+                                <td>{{ stat.path_length }}</td>
+                                <td><small>{{ stat.created_at|date:"M d H:i:s" }}</small></td>
+                            </tr>
+                            {% empty %}
+                            <tr>
+                                <td colspan="6" class="text-center text-muted">No statistics recorded yet</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+// Fetch chart data
+async function loadChartData() {
+    try {
+        const response = await fetch('{% url "admin_panel:statistics_json" %}?algorithm=all&days=7');
+        const data = await response.json();
+        
+        if (data.dates.length === 0) {
+            document.getElementById('executionTimeChart').parentElement.innerHTML = 
+                '<div class="alert alert-info">No data available for charts</div>';
+            document.getElementById('nodesExploredChart').parentElement.innerHTML = 
+                '<div class="alert alert-info">No data available for charts</div>';
+            return;
+        }
+        
+        // Execution Time Chart
+        const executionCtx = document.getElementById('executionTimeChart').getContext('2d');
+        new Chart(executionCtx, {
+            type: 'line',
+            data: {
+                labels: data.dates,
+                datasets: [
+                    {
+                        label: 'Dijkstra Avg Time (ms)',
+                        data: data.dijkstra_time,
+                        borderColor: '#3498db',
+                        backgroundColor: 'rgba(52, 152, 219, 0.1)',
+                        tension: 0.4,
+                        fill: true,
+                    },
+                    {
+                        label: 'A* Avg Time (ms)',
+                        data: data.astar_time,
+                        borderColor: '#f39c12',
+                        backgroundColor: 'rgba(243, 156, 18, 0.1)',
+                        tension: 0.4,
+                        fill: true,
+                    }
+                ]
+            },
+            options: {
+                responsive: true,
+                plugins: {
+                    legend: {
+                        position: 'top',
+                    }
+                },
+                scales: {
+                    y: {
+                        title: {
+                            display: true,
+                            text: 'Execution Time (ms)'
+                        }
+                    }
+                }
+            }
+        });
+        
+        // Nodes Explored Chart
+        const nodesCtx = document.getElementById('nodesExploredChart').getContext('2d');
+        new Chart(nodesCtx, {
+            type: 'line',
+            data: {
+                labels: data.dates,
+                datasets: [
+                    {
+                        label: 'Dijkstra Avg Nodes',
+                        data: data.dijkstra_nodes,
+                        borderColor: '#3498db',
+                        backgroundColor: 'rgba(52, 152, 219, 0.1)',
+                        tension: 0.4,
+                        fill: true,
+                    },
+                    {
+                        label: 'A* Avg Nodes',
+                        data: data.astar_nodes,
+                        borderColor: '#f39c12',
+                        backgroundColor: 'rgba(243, 156, 18, 0.1)',
+                        tension: 0.4,
+                        fill: true,
+                    }
+                ]
+            },
+            options: {
+                responsive: true,
+                plugins: {
+                    legend: {
+                        position: 'top',
+                    }
+                },
+                scales: {
+                    y: {
+                        title: {
+                            display: true,
+                            text: 'Nodes Explored'
+                        }
+                    }
+                }
+            }
+        });
+    } catch (error) {
+        console.error('Error loading chart data:', error);
+    }
+}
+
+// Load charts on page load
+loadChartData();
+</script>
+{% endblock %}

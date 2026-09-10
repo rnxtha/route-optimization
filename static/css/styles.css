@@ -1430,7 +1430,13 @@ header {
 .gps-dot { width:18px; height:18px; position:relative; }
 .gps-dot-inner { width:14px; height:14px; background:#3b82f6; border:3px solid #fff; border-radius:50%; position:absolute; top:2px; left:2px; box-shadow:0 2px 8px rgba(59,130,246,0.5); z-index:2; }
 .gps-dot-pulse { width:18px; height:18px; background: rgba(59,130,246,0.25); border-radius:50%; position:absolute; top:0; left:0; animation: gpsPulse 1.8s ease-out infinite; }
+.map-fab.follow { box-shadow: 0 0 0 2px #10b981; }
+.map-fab.follow-heading { box-shadow: 0 0 0 2px #f97316; transform: rotate(45deg); }
 @keyframes gpsPulse { 0%{transform:scale(0.7); opacity:1} 100%{transform:scale(2.2); opacity:0} }
+.offline-banner { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: rgba(30,32,36,0.96); color: #f3f4f6; padding: 0.5rem 1rem; border-radius: 999px; display: flex; align-items: center; gap: 0.75rem; box-shadow: 0 8px 32px rgba(0,0,0,0.35); z-index: 1000; font-size: 0.85rem; font-weight: 500; backdrop-filter: blur(8px); border: 1px solid rgba(255,255,255,0.08); animation: slideUp 0.3s ease-out; }
+.offline-banner i { color: #f97316; }
+.offline-banner button { padding: 0.25rem 0.75rem; font-size: 0.75rem; }
+@keyframes slideUp { from { opacity: 0; transform: translateX(-50%) translateY(16px); } to { opacity: 1; transform: translateX(-50%) translateY(0); } }
 
 @media (max-width: 760px) {
     .navigation-panel {

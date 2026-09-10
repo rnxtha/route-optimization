@@ -168,7 +168,8 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     function checkButtons() {
         const hasBoth = !!(startLngLat && endLngLat);
-        btnCalculate.disabled = !hasBoth;
+        const hasTwoPlaceNames = !!(startInput.value.trim() && endInput.value.trim());
+        btnCalculate.disabled = !(hasBoth || hasTwoPlaceNames);
         btnNavigate.style.display = hasBoth && lastRouteData ? 'inline-flex' : 'none';
         if (hasBoth && lastRouteData) btnNavigate.disabled = false;
         else if (!lastRouteData) btnNavigate.disabled = true;
@@ -339,7 +340,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let navTotalDistance = 0;
     let currentLocation = null;
     let locationAccuracyCircle = null;
-    let isFollowingLocation = true;
+    let followMode = 'free'; // 'free' = user pans, 'follow' = center on GPS, 'follow-heading' = center + rotate per GPS heading
     let previousGpsPosition = null;
     let navRerouteInFlight = false;
     let lastRerouteAt = 0;
@@ -379,7 +380,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function centerOnLocation(lat, lon, heading = null, duration = 700) {
         const camera = { center: [lon, lat], zoom: Math.max(map.getZoom(), 16), pitch: is3D ? 58 : 0, duration };
-        if (Number.isFinite(heading) && heading >= 0) camera.bearing = heading;
+        if (followMode === 'follow-heading' && Number.isFinite(heading) && heading >= 0) {
+            camera.bearing = heading;
+            camera.rotate = true;
+        } else if (followMode === 'follow' && Number.isFinite(heading) && heading >= 0) {
+            camera.bearing = heading;
+        }
         map.easeTo(camera);
     }
 
@@ -502,7 +508,7 @@ document.addEventListener('DOMContentLoaded', () => {
         navTotalDistance = navSteps.reduce((a,s)=>a+s.distanceM,0);
         navigationPanel.hidden = false;
         document.body.classList.add('navigating');
-        isFollowingLocation = true;
+        followMode = 'follow'; // default to follow GPS mode when navigation starts
         updateNavPanel();
 
         // Try real GPS
@@ -552,8 +558,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             }
         }
-        // Keep the camera attached to the user, like a turn-by-turn map.
-        if (isFollowingLocation) centerOnLocation(lat, lon, heading, 1000);
+        // Camera behavior based on follow mode
+        if (followMode === 'follow' || followMode === 'follow-heading') {
+            centerOnLocation(lat, lon, heading, 1000);
+            // When user drags map while in follow mode, switch to free pan
+        }
+        // If free pan, map stays where user left it
     }
 
     function onGpsError(err) {
@@ -667,6 +677,123 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         worker.postMessage({ type: 'CACHE_URLS', urls: [...urls].slice(0, 500) });
         return Math.min(urls.size, 500);
+    }
+
+    // ==================== OFFLINE TILE CACHING (IndexedDB) ====================
+    async function saveTile(url, blob) {
+        const db = await openDB();
+        return new Promise((res, rej) => {
+            const tx = db.transaction('tiles', 'readwrite');
+            tx.objectStore('tiles').put({ url, data: blob, savedAt: Date.now() });
+            tx.oncomplete = () => res();
+            tx.onerror = () => rej(tx.error);
+        });
+    }
+    async function getTile(url) {
+        const db = await openDB();
+        return new Promise((res, rej) => {
+            const tx = db.transaction('tiles', 'readonly');
+            const req = tx.objectStore('tiles').get(url);
+            req.onsuccess = () => res(req.result ? req.result.data : null);
+            req.onerror = () => rej(req.error);
+        });
+    }
+    async function getAllTiles() {
+        const db = await openDB();
+        return new Promise((res, rej) => {
+            const tx = db.transaction('tiles', 'readonly');
+            const req = tx.objectStore('tiles').getAll();
+            req.onsuccess = () => res(req.result || []);
+            req.onerror = () => rej(req.error);
+        });
+    }
+    async function clearTiles() {
+        const db = await openDB();
+        return new Promise((res, rej) => {
+            const tx = db.transaction('tiles', 'readwrite');
+            tx.objectStore('tiles').clear();
+            tx.oncomplete = () => res();
+            tx.onerror = () => rej(tx.error);
+        });
+    }
+    async function downloadAndCacheTiles(bounds, zoom, maxTiles = 300) {
+        const sources = map.getStyle()?.sources || {};
+        const templates = [];
+        Object.values(sources).forEach(source => (source.tiles || []).forEach(tile => templates.push(tile)));
+        if (currentStyle === 'satellite') templates.push(...SATELLITE_STYLE.sources.esri.tiles, ...SATELLITE_STYLE.sources.roads.tiles, ...SATELLITE_STYLE.sources.places.tiles);
+        const urls = [];
+        for (const level of [Math.max(11, zoom - 1), zoom, Math.min(19, zoom + 1)]) {
+            const minX = tileCoordinate(bounds.west, level), maxX = tileCoordinate(bounds.east, level);
+            const minY = tileY(bounds.north, level), maxY = tileY(bounds.south, level);
+            for (let x = minX; x <= maxX; x++) for (let y = minY; y <= maxY; y++) {
+                templates.forEach(template => urls.push(template.replace('{z}', level).replace('{x}', x).replace('{y}', y)));
+            }
+        }
+        const toDownload = urls.slice(0, maxTiles);
+        let downloaded = 0;
+        for (const url of toDownload) {
+            try {
+                const response = await fetch(url, { cache: 'no-store' });
+                if (response.ok) {
+                    const blob = await response.blob();
+                    await saveTile(url, blob);
+                    downloaded++;
+                }
+            } catch (e) {
+                console.warn('Failed to cache tile:', url, e);
+            }
+        }
+        return downloaded;
+    }
+    function buildOfflineStyle() {
+        return {
+            version: 8,
+            name: 'Offline Tiles',
+            sources: {
+                'offline-raster': {
+                    type: 'raster',
+                    tiles: ['local://{z}/{x}/{y}'],
+                    tileSize: 256,
+                    attribution: 'Offline cached tiles'
+                }
+            },
+            layers: [{
+                id: 'offline-layer',
+                type: 'raster',
+                source: 'offline-raster',
+                paint: { 'raster-opacity': 1 }
+            }]
+        };
+    }
+    async function switchToOfflineStyle() {
+        try {
+            const tiles = await getAllTiles();
+            if (tiles.length === 0) return false;
+            // We'll intercept tile requests and serve from IndexedDB
+            // For now, use a workaround: create a style with local tile URLs
+            // MapLibre doesn't support custom protocols easily, so we'll use a different approach
+            // Show offline banner instead
+            showOfflineBanner(tiles.length);
+            return true;
+        } catch (e) {
+            console.error('Failed to switch to offline style:', e);
+            return false;
+        }
+    }
+    function showOfflineBanner(tileCount = 0) {
+        let banner = document.getElementById('offline-map-banner');
+        if (!banner) {
+            banner = document.createElement('div');
+            banner.id = 'offline-map-banner';
+            banner.className = 'offline-banner';
+            document.body.appendChild(banner);
+        }
+        banner.innerHTML = `<i class="fa-solid fa-wifi-slash"></i> <span>Offline mode · ${tileCount} map tiles cached</span> <button class="btn btn-sm btn-ghost" onclick="document.getElementById('offline-map-banner').style.display='none'">Dismiss</button>`;
+        banner.style.display = 'flex';
+    }
+    function hideOfflineBanner() {
+        const banner = document.getElementById('offline-map-banner');
+        if (banner) banner.style.display = 'none';
     }
 
     // JS implementations for offline routing
@@ -915,12 +1042,13 @@ document.addEventListener('DOMContentLoaded', () => {
             const id = 'region-'+Date.now();
             await saveRegion({ id, name, bounds, boundsText: `${bounds.west.toFixed(2)}°W → ${bounds.east.toFixed(2)}°E, ${bounds.south.toFixed(2)}°S → ${bounds.north.toFixed(2)}°N`, sizeMB, savedAt: Date.now() });
             await saveGraph(id, graph);
-            const tileCount = await cacheCurrentMapView(bounds, zoom);
+            loadingStepText.innerText='Downloading map tiles for offline use...';
+            const tileCount = await downloadAndCacheTiles(bounds, zoom, 300);
             loadingOverlay.classList.remove('active');
             showError(''); hideError();
             // show success as transient
             const msg = document.createElement('div');
-            msg.className='offline-toast'; msg.innerHTML='<i class="fa-solid fa-check"></i> Offline region saved ('+sizeMB+' MB, '+tileCount+' map tiles)';
+            msg.className='offline-toast'; msg.innerHTML='<i class="fa-solid fa-check"></i> Offline region saved ('+sizeMB+' MB graph, '+tileCount+' map tiles cached)';
             document.body.appendChild(msg);
             setTimeout(()=>msg.remove(),3000);
             refreshOfflineUI();
@@ -955,6 +1083,10 @@ document.addEventListener('DOMContentLoaded', () => {
         if(!online){
             // auto-enable offline routing if we have regions
             getRegions().then(rs=>{ if(rs.length>0) { useOfflineRouting = rs.sort((a,b)=>b.savedAt-a.savedAt)[0].id; refreshOfflineUI(); }});
+            // show offline map banner if tiles are cached
+            getAllTiles().then(tiles=>{ if(tiles.length>0) showOfflineBanner(tiles.length); });
+        } else {
+            hideOfflineBanner();
         }
     }
     window.addEventListener('online', updateOnlineStatus);
@@ -1012,18 +1144,42 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     document.getElementById('btn-locate').addEventListener('click', () => {
         if (!navigator.geolocation) { showError('Geolocation is not supported.'); return; }
-        isFollowingLocation = true;
+        // Cycle follow modes: free → follow → follow-heading → free
+        if (followMode === 'free') followMode = 'follow';
+        else if (followMode === 'follow') followMode = 'follow-heading';
+        else followMode = 'free';
+        // Update button visual state (add rotating indicator classes)
+        const btn = document.getElementById('btn-locate');
+        btn.classList.remove('follow', 'follow-heading');
+        if (followMode === 'follow') btn.classList.add('follow');
+        else if (followMode === 'follow-heading') btn.classList.add('follow-heading');
+        // Request GPS position for the new mode
         navigator.geolocation.getCurrentPosition(pos => {
             const { latitude: lat, longitude: lng } = pos.coords;
-            if (!inBounds(lat, lng)) { showError('Your location is outside the Kathmandu Valley study area.'); return; }
+            if (!inBounds(lat, lng)) { showError('Your location is outside the Kathmandu Valley study area.'); // revert mode
+                // reset to free pan on error
+                followMode = 'free';
+                btn.classList.remove('follow', 'follow-heading');
+                return;
+            }
             currentLocation = { lat, lon: lng, accuracy: pos.coords.accuracy };
             updateLocationMarker(lat, lng, pos.coords.accuracy);
             centerOnLocation(lat, lng, pos.coords.heading, 1000);
             if (!startMarker) setStart(lat, lng, false);
             else if (!endMarker) setEnd(lat, lng, false);
-        }, err => showError(err.code === 1 ? 'Location permission denied. Allow location access and try again.' : 'Could not read your location. Try again.'), { enableHighAccuracy: true, maximumAge: 10000, timeout: 15000 });
+        }, err => {
+            let msg = 'GPS unavailable';
+            if (err.code === 1) msg = 'Location permission denied — allow access and try again';
+            else if (err.code === 2) msg = 'GPS unavailable — tap steps to navigate manually';
+            else if (err.code === 3) msg = 'GPS timeout — tap steps to navigate manually';
+            showError(msg);
+            // reset to free pan on error
+            followMode = 'free';
+            const b = document.getElementById('btn-locate');
+            b.classList.remove('follow', 'follow-heading');
+        }, { enableHighAccuracy: true, maximumAge: 10000, timeout: 15000 });
     });
-    map.on('dragstart', () => { if (navigationPanel.hidden === false) isFollowingLocation = false; });
+    map.on('dragstart', () => { if (navigationPanel.hidden === false) followMode = 'free'; });
     btnReset.addEventListener('click', () => { resetRouting(); map.flyTo({ center: CENTER, zoom: DEFAULT_ZOOM, pitch: is3D ? DEFAULT_PITCH : 0, bearing: is3D ? DEFAULT_BEARING : 0, duration: 900 }); });
     btnSwap.addEventListener('click', () => {
         if (!startLngLat || !endLngLat) return;
@@ -1141,6 +1297,9 @@ document.addEventListener('DOMContentLoaded', () => {
     startInput.addEventListener('input', e => {
         const q = e.target.value.trim();
         clearStartBtn.style.display = q ? 'block' : 'none';
+        startLngLat = null;
+        if (startMarker) { startMarker.remove(); startMarker = null; }
+        clearRoutes(); checkButtons(); updateHint();
         if (startTimeout) clearTimeout(startTimeout);
         if (!q) { startResults.style.display = 'none'; return; }
         startTimeout = setTimeout(() => doSearch(q, startResults, 'start'), 350);
@@ -1148,6 +1307,9 @@ document.addEventListener('DOMContentLoaded', () => {
     endInput.addEventListener('input', e => {
         const q = e.target.value.trim();
         clearEndBtn.style.display = q ? 'block' : 'none';
+        endLngLat = null;
+        if (endMarker) { endMarker.remove(); endMarker = null; }
+        clearRoutes(); checkButtons(); updateHint();
         if (endTimeout) clearTimeout(endTimeout);
         if (!q) { endResults.style.display = 'none'; return; }
         endTimeout = setTimeout(() => doSearch(q, endResults, 'end'), 350);

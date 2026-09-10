@@ -8,6 +8,10 @@ class NearestNodeFinder:
     """
     def __init__(self, graph: Graph):
         self.graph = graph
+        self._incoming = {node_id: set() for node_id in graph.nodes}
+        for source_id, edges in graph.adjacency_list.items():
+            for edge in edges:
+                self._incoming.setdefault(edge.destination, set()).add(source_id)
 
     def find_nearest(self, lat: float, lon: float) -> int:
         """
@@ -34,3 +38,27 @@ class NearestNodeFinder:
                 best_node_id = node_id
 
         return best_node_id
+
+    def find_nearest_junction(self, lat: float, lon: float) -> int:
+        """Find the closest node that connects at least three road segments."""
+        junction_ids = {
+            node_id for node_id in self.graph.nodes
+            if self._connection_count(node_id) >= 3
+        }
+        if not junction_ids:
+            return self.find_nearest(lat, lon)
+        return self._find_nearest_from(lat, lon, junction_ids)
+
+    def _connection_count(self, node_id: int) -> int:
+        outgoing = {edge.destination for edge in self.graph.get_neighbors(node_id)}
+        return len(outgoing | self._incoming.get(node_id, set()))
+
+    def _find_nearest_from(self, lat: float, lon: float, node_ids) -> int:
+        cos_lat = math.cos(math.radians(lat))
+        return min(
+            node_ids,
+            key=lambda node_id: (
+                (self.graph.nodes[node_id].lat - lat) ** 2
+                + ((self.graph.nodes[node_id].lon - lon) * cos_lat) ** 2
+            )
+        )

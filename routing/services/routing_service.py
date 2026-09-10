@@ -109,12 +109,41 @@ class RoutingService:
         }
 
     def calculate_routes(self, start_lat: float, start_lon: float, end_lat: float, end_lon: float) -> Dict[str, Any]:
-        start_node_id = self.finder.find_nearest(start_lat, start_lon)
-        end_node_id = self.finder.find_nearest(end_lat, end_lon)
+        start_node_id = self.finder.find_nearest_junction(start_lat, start_lon)
+        end_node_id = self.finder.find_nearest_junction(end_lat, end_lon)
 
         # Run both algorithms on distance weights
         dijkstra_result = self.dijkstra_algo.find_route(self.graph, start_node_id, end_node_id)
         astar_result = self.astar_algo.find_route(self.graph, start_node_id, end_node_id)
+
+        # Log statistics to database
+        try:
+            from ..models import RouteStatistic
+            RouteStatistic.objects.create(
+                algorithm='dijkstra',
+                execution_time_ms=dijkstra_result.execution_time * 1000,
+                distance_meters=dijkstra_result.distance,
+                nodes_explored=dijkstra_result.nodes_explored,
+                path_length=dijkstra_result.path_nodes_count,
+                start_lat=start_lat,
+                start_lon=start_lon,
+                end_lat=end_lat,
+                end_lon=end_lon,
+            )
+            RouteStatistic.objects.create(
+                algorithm='astar',
+                execution_time_ms=astar_result.execution_time * 1000,
+                distance_meters=astar_result.distance,
+                nodes_explored=astar_result.nodes_explored,
+                path_length=astar_result.path_nodes_count,
+                start_lat=start_lat,
+                start_lon=start_lon,
+                end_lat=end_lat,
+                end_lon=end_lon,
+            )
+        except Exception as e:
+            # Silently fail if statistics logging fails
+            pass
 
         best_path = dijkstra_result.path if dijkstra_result.path else astar_result.path
         best_edges = self._get_path_edges(best_path)

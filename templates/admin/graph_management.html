@@ -1,0 +1,175 @@
+{% extends "admin/base.html" %}
+
+{% block title %}Graph Management - Admin Panel{% endblock %}
+{% block page_title %}🗺️ Graph Management{% endblock %}
+
+{% block content %}
+<div class="row mb-4">
+    <div class="col-md-8">
+        <div class="card">
+            <div class="card-header" style="background-color: #3498db; color: white;">
+                <h5 style="margin: 0;">Upload New Graph</h5>
+            </div>
+            <div class="card-body">
+                <p>Upload a new OSM road graph file (JSON format) to replace the current graph.</p>
+                
+                <form id="uploadForm" enctype="multipart/form-data">
+                    {% csrf_token %}
+                    <div class="mb-3">
+                        <label for="graphFile" class="form-label">Graph File (JSON)</label>
+                        <input type="file" class="form-control" id="graphFile" name="graph_file" accept=".json" required>
+                        <small class="text-muted">File should contain "nodes" and "edges" arrays</small>
+                    </div>
+                    
+                    <div id="uploadProgress" style="display: none;">
+                        <div class="progress mb-3">
+                            <div class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" 
+                                 style="width: 0%" id="progressBar"></div>
+                        </div>
+                        <p id="progressText">Uploading...</p>
+                    </div>
+                    
+                    <div id="uploadResult"></div>
+                    
+                    <button type="submit" class="btn btn-primary" id="uploadBtn">
+                        📤 Upload Graph
+                    </button>
+                    <button type="reset" class="btn btn-secondary">Clear</button>
+                </form>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-4">
+        <div class="card stat-card">
+            <div class="card-body">
+                <h5 class="card-title">Current Graph</h5>
+                <div class="row mb-3">
+                    <div class="col-12">
+                        <div class="stat-label">Status</div>
+                        <div style="margin-top: 10px;">
+                            <span class="graph-status {% if metadata.graph_status == 'active' %}active{% elif metadata.graph_status == 'loading' %}loading{% else %}error{% endif %}">
+                                {{ metadata.get_graph_status_display }}
+                            </span>
+                        </div>
+                    </div>
+                </div>
+                <table class="table table-sm">
+                    <tr>
+                        <td><strong>Nodes:</strong></td>
+                        <td>{{ metadata.total_nodes|floatformat:0 }}</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Edges:</strong></td>
+                        <td>{{ metadata.total_edges|floatformat:0 }}</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Size:</strong></td>
+                        <td>{{ metadata.file_size_mb|floatformat:2 }} MB</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Updated:</strong></td>
+                        <td><small>{{ metadata.last_updated|date:"M d H:i" }}</small></td>
+                    </tr>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-md-8">
+        <div class="card">
+            <div class="card-header" style="background-color: #27ae60; color: white;">
+                <h5 style="margin: 0;">Rebuild Graph</h5>
+            </div>
+            <div class="card-body">
+                <p>Reload and rebuild the graph from the current graph file without uploading a new one.</p>
+                <button type="button" class="btn btn-success" id="rebuildBtn" onclick="rebuildGraph()">
+                    🔄 Rebuild Graph
+                </button>
+                <div id="rebuildResult" style="margin-top: 15px;"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+document.getElementById('uploadForm').addEventListener('submit', function(e) {
+    e.preventDefault();
+    
+    const fileInput = document.getElementById('graphFile');
+    const file = fileInput.files[0];
+    
+    if (!file) {
+        showAlert('Please select a file', 'danger');
+        return;
+    }
+    
+    const formData = new FormData();
+    formData.append('graph_file', file);
+    formData.append('csrfmiddlewaretoken', document.querySelector('[name="csrfmiddlewaretoken"]').value);
+    
+    document.getElementById('uploadProgress').style.display = 'block';
+    document.getElementById('uploadBtn').disabled = true;
+    
+    fetch('{% url "admin_panel:upload_graph" %}', {
+        method: 'POST',
+        body: formData,
+    })
+    .then(response => response.json())
+    .then(data => {
+        document.getElementById('uploadProgress').style.display = 'none';
+        document.getElementById('uploadBtn').disabled = false;
+        
+        if (data.success) {
+            showAlert(`Graph uploaded successfully! Nodes: ${data.nodes}, Edges: ${data.edges}`, 'success');
+            document.getElementById('uploadForm').reset();
+            setTimeout(() => location.reload(), 2000);
+        } else {
+            showAlert(`Error: ${data.error}`, 'danger');
+        }
+    })
+    .catch(error => {
+        document.getElementById('uploadProgress').style.display = 'none';
+        document.getElementById('uploadBtn').disabled = false;
+        showAlert(`Network error: ${error}`, 'danger');
+    });
+});
+
+function rebuildGraph() {
+    const btn = document.getElementById('rebuildBtn');
+    btn.disabled = true;
+    btn.innerHTML = '🔄 Rebuilding...';
+    
+    fetch('{% url "admin_panel:rebuild_graph" %}', {
+        method: 'GET',
+    })
+    .then(response => response.json())
+    .then(data => {
+        btn.disabled = false;
+        btn.innerHTML = '🔄 Rebuild Graph';
+        
+        if (data.success) {
+            showAlert(`Graph rebuilt successfully! Nodes: ${data.nodes}, Edges: ${data.edges}`, 'success', 'rebuildResult');
+            setTimeout(() => location.reload(), 2000);
+        } else {
+            showAlert(`Error: ${data.error}`, 'danger', 'rebuildResult');
+        }
+    })
+    .catch(error => {
+        btn.disabled = false;
+        btn.innerHTML = '🔄 Rebuild Graph';
+        showAlert(`Network error: ${error}`, 'danger', 'rebuildResult');
+    });
+}
+
+function showAlert(message, type = 'info', targetId = 'uploadResult') {
+    const target = document.getElementById(targetId);
+    target.innerHTML = `<div class="alert alert-${type} alert-dismissible fade show" role="alert">
+        ${message}
+        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+    </div>`;
+}
+</script>
+{% endblock %}
