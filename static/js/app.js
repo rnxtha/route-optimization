@@ -57,6 +57,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let distanceMarkers = [];
     let activeRouteVisibility = { astar: true, dijkstra: true, alt1: true, alt2: true };
     let useOfflineRouting = false;
+    let showSearchArea = false; // optional explored-nodes overlay (kept subtle so routes stay visible)
 
     const startInput = document.getElementById('start-input');
     const endInput = document.getElementById('end-input');
@@ -175,7 +176,29 @@ document.addEventListener('DOMContentLoaded', () => {
         else if (!lastRouteData) btnNavigate.disabled = true;
     }
     function emptyLine() { return { type: 'Feature', geometry: { type: 'LineString', coordinates: [] } }; }
+    function emptyPoints() { return { type: 'FeatureCollection', features: [] }; }
+    function getSelectedAlgorithm() {
+        const el = document.querySelector('input[name="algorithm"]:checked');
+        const v = el ? el.value : 'astar';
+        return (v === 'dijkstra' || v === 'astar' || v === 'both') ? v : 'astar';
+    }
     function ensureRouteLayers() {
+        // Explored-node (search area) layers first so route lines always render on top.
+        ['dijkstra', 'astar'].forEach(key => {
+            const src = `explored-${key}`;
+            if (!map.getSource(src)) {
+                map.addSource(src, { type: 'geojson', data: emptyPoints() });
+                map.addLayer({
+                    id: `${src}-dots`, type: 'circle', source: src,
+                    paint: {
+                        'circle-radius': 2.5,
+                        'circle-opacity': 0.35,
+                        'circle-color': key === 'astar' ? '#10b981' : '#1d4ed8',
+                        'circle-stroke-width': 0
+                    }
+                });
+            }
+        });
         if (map.getSource('route-astar')) { routeLayersReady = true; return; }
         const routeConfigs = [
             { id: 'alt2', color: ROUTE_COLORS.alt2.line, width: 4, dash: [3, 4] },
@@ -196,7 +219,15 @@ document.addEventListener('DOMContentLoaded', () => {
     function clearRoutes() {
         lastRouteData = null;
         ['dijkstra', 'astar', 'alt1', 'alt2'].forEach(id => { if (map.getSource(`route-${id}`)) map.getSource(`route-${id}`).setData(emptyLine()); });
+        ['dijkstra', 'astar'].forEach(id => { if (map.getSource(`explored-${id}`)) map.getSource(`explored-${id}`).setData(emptyPoints()); });
+        ['legend-search-dijkstra', 'legend-search-astar'].forEach(lid => { const el = document.getElementById(lid); if (el) el.style.display = 'none'; });
         distanceMarkers.forEach(m => m.remove()); distanceMarkers = [];
+        resultsSection.style.display = 'none';
+        routeToggleGroup.innerHTML = '';
+        const statsPanel = document.getElementById('route-stats-panel');
+        if (statsPanel) statsPanel.style.display = 'none';
+        const statsBody = document.getElementById('route-stats-body');
+        if (statsBody) statsBody.innerHTML = '';
         resultsSection.style.display = 'none';
         routeToggleGroup.innerHTML = '';
         routeInfoPanel.hidden = true;
@@ -231,6 +262,30 @@ document.addEventListener('DOMContentLoaded', () => {
         const dot = document.querySelector(`.route-toggle-dot[data-key="${key}"]`);
         if (dot) dot.classList.toggle('dimmed', !visible);
     }
+    function setExploredData(key, coordsLatLon) {
+        // coordsLatLon: [[lat, lon], ...] from API (explored_coords) — small
+        // translucent dots rendered UNDER the route lines so the final route
+        // stays clearly visible.
+        if (!routeLayersReady) ensureRouteLayers();
+        const src = map.getSource(`explored-${key}`);
+        if (!src) return;
+        if (!showSearchArea || !coordsLatLon || coordsLatLon.length === 0) {
+            src.setData(emptyPoints());
+            const leg = document.getElementById(key === 'astar' ? 'legend-search-astar' : 'legend-search-dijkstra');
+            if (leg) leg.style.display = 'none';
+            return;
+        }
+        src.setData({ type: 'FeatureCollection', features: coordsLatLon.map(c => ({ type: 'Feature', geometry: { type: 'Point', coordinates: [c[1], c[0]] } })) });
+        const leg = document.getElementById(key === 'astar' ? 'legend-search-astar' : 'legend-search-dijkstra');
+        if (leg) leg.style.display = 'flex';
+    }
+    function refreshSearchArea() {
+        if (!lastRouteData) return;
+        ['dijkstra', 'astar'].forEach(k => {
+            const coords = lastRouteData[k] && lastRouteData[k].explored_coords ? lastRouteData[k].explored_coords : null;
+            setExploredData(k, coords);
+        });
+    }
     function createDistanceBubble(path, color, text, frac = 0.5) {
         const p = pointAtFraction(path, frac);
         if (!p) return;
@@ -243,10 +298,9 @@ document.addEventListener('DOMContentLoaded', () => {
         distanceMarkers.push(marker);
     }
     function buildRouteToggles(data) {
-        const routes = [
-            { key: 'astar', label: 'A* (Heuristic)', color: ROUTE_COLORS.astar.line },
-            { key: 'dijkstra', label: 'Dijkstra', color: ROUTE_COLORS.dijkstra.line }
-        ];
+        const routes = [];
+        if (data.astar) routes.push({ key: 'astar', label: 'A* (Heuristic)', color: ROUTE_COLORS.astar.line });
+        if (data.dijkstra) routes.push({ key: 'dijkstra', label: 'Dijkstra', color: ROUTE_COLORS.dijkstra.line });
         if (data.alt1) routes.push({ key: 'alt1', label: 'Alternative 1', color: ROUTE_COLORS.alt1.line });
         if (data.alt2) routes.push({ key: 'alt2', label: 'Alternative 2', color: ROUTE_COLORS.alt2.line });
         routeToggleGroup.innerHTML = '';
@@ -333,6 +387,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
     let navSteps = [];
     let navCurrentIdx = 0;
+    // True once a GPS fix has come within range of the planned path.
+    // Auto-reroute only fires after joining — planning a trip from elsewhere
+    // (e.g. from home) must not rebuild the route onto the live GPS dot.
+    let hasJoinedRoute = false;
+    const JOIN_ROUTE_METERS = 80;
     let navWatchId = null;
     let navPath = [];
     let navRoadNames = [];
@@ -347,8 +406,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const OFF_ROUTE_THRESHOLD_METERS = 60;
     const REROUTE_COOLDOWN_MS = 15000;
 
-    function updateLocationMarker(lat, lon, accuracy = 0) {
-        if (!currentPosMarker) {
+    function updateLocationMarker(lat, lon, accuracy = 0) {        if (!currentPosMarker) {
             const el = document.createElement('div');
             el.className = 'gps-dot';
             el.innerHTML = '<div class="gps-dot-inner"></div><div class="gps-dot-pulse"></div>';
@@ -358,7 +416,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         const source = map.getSource('location-accuracy');
         if (source) {
-            const radius = Math.min(Math.max(accuracy || 25, 15), 300);
+            const radius = Math.min(Math.max(accuracy || 25, 5), 300);
             const points = [];
             for (let i = 0; i <= 64; i++) {
                 const angle = (i / 64) * Math.PI * 2;
@@ -471,7 +529,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (!payload.success) throw new Error(payload.error || 'Route recalculation failed.');
                 data = payload.data;
             }
-            if (!data.astar || !data.astar.path || data.astar.path.length < 2) throw new Error('No replacement route found.');
+            if (!data.astar || !data.astar.path || data.astar.path.length < 2) {
+                if (!data.dijkstra || !data.dijkstra.path || data.dijkstra.path.length < 2) throw new Error('No replacement route found.');
+                data.astar = data.dijkstra;
+            }
             renderRouteResult(data);
             routeInfoPanel.hidden = true;
             navPath = data.astar.path;
@@ -481,6 +542,7 @@ document.addEventListener('DOMContentLoaded', () => {
             navTotalDistance = navSteps.reduce((total, step) => total + step.distanceM, 0);
             updateNavPanel();
             document.getElementById('nav-subtitle').textContent = 'Route updated · GPS active';
+            hasJoinedRoute = false; // re-join the fresh path on the next fix
         } catch (error) {
             document.getElementById('nav-subtitle').textContent = 'Off route · unable to recalculate';
             showError(error.message);
@@ -497,30 +559,36 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function startNavigation() {
-        if (!lastRouteData || !lastRouteData.astar || !lastRouteData.astar.path || lastRouteData.astar.path.length === 0) {
+        const primary = (lastRouteData && (lastRouteData.astar || lastRouteData.dijkstra)) || null;
+        if (!primary || !primary.path || primary.path.length === 0) {
             showError('No route available to navigate. Please calculate a route first.');
             return;
         }
-        navPath = lastRouteData.astar.path;
-        navRoadNames = lastRouteData.astar.road_names || [];
+        navPath = primary.path;
+        navRoadNames = primary.road_names || [];
         navSteps = generateNavigationSteps(navPath, navRoadNames);
         navCurrentIdx = 0;
         navTotalDistance = navSteps.reduce((a,s)=>a+s.distanceM,0);
+        hasJoinedRoute = false; // (re-)join the path on the next GPS fix
         navigationPanel.hidden = false;
         document.body.classList.add('navigating');
         followMode = 'follow'; // default to follow GPS mode when navigation starts
+        // Lock the pins: accidental taps/drags while zooming must not move
+        // the route. Zoom controls, locate and the nav panel keep working.
+        try { if (startMarker) startMarker.setDraggable(false); } catch {}
+        try { if (endMarker) endMarker.setDraggable(false); } catch {}
         updateNavPanel();
 
         // Try real GPS
         if ('geolocation' in navigator) {
             document.getElementById('nav-subtitle').textContent = 'Waiting for GPS...';
             navigator.geolocation.getCurrentPosition(onGpsUpdate, onGpsError, {
-                enableHighAccuracy: true, maximumAge: 10000, timeout: 15000
+                enableHighAccuracy: true, maximumAge: 0, timeout: 15000
             });
             navWatchId = navigator.geolocation.watchPosition(
                 onGpsUpdate,
                 onGpsError,
-                { enableHighAccuracy: true, maximumAge: 1000, timeout: 10000 }
+                { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 }
             );
             // fallback: if no GPS within 6s, explain manual mode
             setTimeout(() => {
@@ -536,6 +604,12 @@ document.addEventListener('DOMContentLoaded', () => {
     function onGpsUpdate(pos) {
         const lat = pos.coords.latitude, lon = pos.coords.longitude;
         if (!inBounds(lat, lon)) return; // ignore outside valley
+        // Jump filter: a fix that teleports >300 m with poor accuracy is a
+        // bad reading, not movement — ignore it so the dot/route don't jump.
+        if (previousGpsPosition && (pos.coords.accuracy || 9999) > 150) {
+            const jump = haversineMeters(previousGpsPosition.lat, previousGpsPosition.lon, lat, lon);
+            if (jump > 300) return;
+        }
         let heading = Number.isFinite(pos.coords.heading) && pos.coords.heading >= 0 ? pos.coords.heading : null;
         if (heading === null && previousGpsPosition) {
             const moved = haversineMeters(previousGpsPosition.lat, previousGpsPosition.lon, lat, lon);
@@ -544,6 +618,24 @@ document.addEventListener('DOMContentLoaded', () => {
         previousGpsPosition = { lat, lon };
         currentLocation = { lat, lon, accuracy: pos.coords.accuracy };
         updateLocationMarker(lat, lon, pos.coords.accuracy);
+        if (!hasJoinedRoute) {
+            // Join check needs a reasonably good fix, not a drifted one.
+            const acc = pos.coords.accuracy || 9999;
+            const nearest = navPath.length ? nearestPointOnPath(lat, lon, navPath) : null;
+            if (nearest && acc <= 150 && nearest.distance <= JOIN_ROUTE_METERS) {
+                hasJoinedRoute = true;
+            } else {
+                // Not on the planned route yet (e.g. planning from home):
+                // hold the plan and guide to the start instead of rebuilding
+                // the whole trip onto the GPS dot.
+                let dStart = null;
+                if (navPath.length) dStart = haversineMeters(lat, lon, navPath[0][0], navPath[0][1]);
+                document.getElementById('nav-subtitle').textContent =
+                    dStart === null ? 'Waiting for GPS…' : `Head to start · ${formatDistance(dStart)} away`;
+                if (followMode === 'follow' || followMode === 'follow-heading') centerOnLocation(lat, lon, heading, 1000);
+                return;
+            }
+        }
         document.getElementById('nav-subtitle').textContent = `GPS active · ±${Math.round(pos.coords.accuracy)} m`;
         checkOffRoute(lat, lon);
         // advance step if close to next maneuver
@@ -577,6 +669,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function stopNavigation() {
         if (navWatchId !== null) { navigator.geolocation.clearWatch(navWatchId); navWatchId = null; }
+        // Unlock the pins so start/destination can be adjusted again.
+        try { if (startMarker) startMarker.setDraggable(true); } catch {}
+        try { if (endMarker) endMarker.setDraggable(true); } catch {}
         if (currentPosMarker) { currentPosMarker.remove(); currentPosMarker = null; }
         currentLocation = null;
         previousGpsPosition = null;
@@ -584,6 +679,7 @@ document.addEventListener('DOMContentLoaded', () => {
         navigationPanel.hidden = true;
         document.body.classList.remove('navigating');
         navSteps = []; navCurrentIdx = 0;
+        hasJoinedRoute = false;
     }
 
     // ==================== OFFLINE (IndexedDB) ====================
@@ -824,6 +920,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const dist = new Map([[startId, 0]]);
         const parent = new Map();
         const visited = new Set();
+        const visitedOrder = [];
         const pq = [[0, startId]];
         let explored = 0;
         function popMin() {
@@ -834,7 +931,7 @@ document.addEventListener('DOMContentLoaded', () => {
         while (pq.length) {
             const [d,u] = popMin();
             if (visited.has(u)) continue;
-            visited.add(u); explored++;
+            visited.add(u); visitedOrder.push(u); explored++;
             if (u===endId) break;
             const neigh = adj.get(u) || [];
             for (const e of neigh) {
@@ -847,12 +944,12 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
         const t1 = performance.now();
-        if (!dist.has(endId)) return { path: [], distance: Infinity, nodes_explored: explored, execution_time: (t1-t0)/1000 };
+        if (!dist.has(endId)) return { path: [], distance: Infinity, nodes_explored: explored, execution_time: (t1-t0)/1000, visitedOrder };
         const path = [];
         let cur = endId;
         while (cur !== undefined) { path.push(cur); cur = parent.get(cur); if (cur===startId) { path.push(cur); break; } }
         path.reverse();
-        return { path, distance: dist.get(endId), nodes_explored: explored, execution_time: (t1-t0)/1000 };
+        return { path, distance: dist.get(endId), nodes_explored: explored, execution_time: (t1-t0)/1000, visitedOrder };
     }
     function astarJS(graph, startId, endId, penalizedEdges=null, penalty=1.0) {
         const t0 = performance.now();
@@ -867,13 +964,14 @@ document.addEventListener('DOMContentLoaded', () => {
         const fScore = new Map([[startId, haversine(nodeMap.get(startId).lat, nodeMap.get(startId).lon, endNode.lat, endNode.lon)]]);
         const parent = new Map();
         const visited = new Set();
+        const visitedOrder = [];
         const pq = [[fScore.get(startId), startId]];
         let explored=0;
         function popMin(){ let mi=0; for(let i=1;i<pq.length;i++) if(pq[i][0]<pq[mi][0]) mi=i; return pq.splice(mi,1)[0]; }
         while(pq.length){
             const [f,u]=popMin();
             if(visited.has(u)) continue;
-            visited.add(u); explored++;
+            visited.add(u); visitedOrder.push(u); explored++;
             if(u===endId) break;
             const curG=gScore.get(u);
             for(const e of (adj.get(u)||[])){
@@ -890,11 +988,11 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
         const t1=performance.now();
-        if(!gScore.has(endId)) return { path:[], distance:Infinity, nodes_explored: explored, execution_time:(t1-t0)/1000 };
+        if(!gScore.has(endId)) return { path:[], distance:Infinity, nodes_explored: explored, execution_time:(t1-t0)/1000, visitedOrder };
         const path=[]; let cur=endId; while(cur!==undefined){ path.push(cur); cur=parent.get(cur); if(cur===startId){path.push(cur);break;} } path.reverse();
-        return { path, distance: gScore.get(endId), nodes_explored: explored, execution_time:(t1-t0)/1000 };
+        return { path, distance: gScore.get(endId), nodes_explored: explored, execution_time:(t1-t0)/1000, visitedOrder };
     }
-    async function offlineRoute(startLat, startLon, endLat, endLon) {
+    async function offlineRoute(startLat, startLon, endLat, endLon, includeExplored=false, algorithm='both') {
         // Load graph from IndexedDB, fallback to fetching from server if online
         let graph = null;
         const regions = await getRegions();
@@ -915,10 +1013,22 @@ document.addEventListener('DOMContentLoaded', () => {
         const g = graph;
         const startId = findNearestNode(g, startLat, startLon);
         const endId = findNearestNode(g, endLat, endLon);
-        const dRes = dijkstraJS(g, startId, endId);
-        const aRes = astarJS(g, startId, endId);
+        const wantD = algorithm !== 'astar', wantA = algorithm !== 'dijkstra';
+        const dRes = wantD ? dijkstraJS(g, startId, endId) : null;
+        const aRes = wantA ? astarJS(g, startId, endId) : null;
         // Build response similar to server
         const nodeMap = new Map(g.nodes.map(n=>[n.id, n]));
+        function exploredCoords(r) {
+            if (!includeExplored || !r || !r.visitedOrder) return undefined;
+            const order = r.visitedOrder;
+            const step = Math.max(1, Math.floor(order.length / 2000));
+            const out = [];
+            for (let i = 0; i < order.length && out.length < 2000; i += step) {
+                const n = nodeMap.get(order[i]);
+                if (n) out.push([n.lat, n.lon]);
+            }
+            return out;
+        }
         function buildResult(r, label){
             const coords = r.path.map(id=>{ const n=nodeMap.get(id); return n?[n.lat, n.lon]:null; }).filter(Boolean);
             // road names
@@ -936,24 +1046,29 @@ document.addEventListener('DOMContentLoaded', () => {
                 const e=edgeMap.get(r.path[i]+','+r.path[i+1]);
                 if(e){ const kmh = ({motorway:80, trunk:70, primary:50, secondary:40, tertiary:35, residential:25, unclassified:25, service:20}[e.highway]||30); totalSec+= e.distance/(kmh/3.6); }
             }
-            return {
+            const res = {
                 label, distance_meters: r.distance, distance_km: r.distance===Infinity?null:+(r.distance/1000).toFixed(3),
-                execution_time_seconds: r.execution_time, nodes_explored: r.nodes_explored, path_nodes_count: r.path.length,
+                execution_time_seconds: r.execution_time, execution_time_ms: +(r.execution_time*1000).toFixed(2),
+                nodes_explored: r.nodes_explored, path_nodes_count: r.path.length,
                 path: coords, road_names: roadNames, unique_road_names: uniq, travel_time_minutes: +(totalSec/60).toFixed(1)
             };
+            const ec = exploredCoords(r);
+            if (ec) res.explored_coords = ec;
+            return res;
         }
-        const dijkstra = buildResult(dRes, 'Dijkstra (Shortest)');
-        const astar = buildResult(aRes, 'A* (Heuristic)');
-        // Alternatives
+        const dijkstra = dRes ? buildResult(dRes, 'Dijkstra (Shortest)') : null;
+        const astar = aRes ? buildResult(aRes, 'A* (Heuristic)') : null;
+        // Alternatives (based on whichever primary path exists; legacy behaviour preserved for 'both')
         let alt1=null, alt2=null;
-        if(dRes.path.length){
-            const pen = new Set(dRes.path.slice(0,-1).map((id,i)=>id+','+dRes.path[i+1]));
+        const basePath = (dRes && dRes.path.length ? dRes.path : (aRes && aRes.path.length ? aRes.path : []));
+        if(basePath.length){
+            const pen = new Set(basePath.slice(0,-1).map((id,i)=>id+','+basePath[i+1]));
             const a1 = dijkstraJS(g, startId, endId, pen, 3.0);
-            if(a1.path.length && a1.path.join(',')!==dRes.path.join(',')){
+            if(a1.path.length && a1.path.join(',')!==basePath.join(',')){
                 alt1 = buildResult(a1, 'Alternative 1');
                 const pen2 = new Set([...pen, ...a1.path.slice(0,-1).map((id,i)=>id+','+a1.path[i+1])]);
                 const a2 = astarJS(g, startId, endId, pen2, 4.0);
-                if(a2.path.length && a2.path.join(',')!==dRes.path.join(',') && a2.path.join(',')!==a1.path.join(',')){
+                if(a2.path.length && a2.path.join(',')!==basePath.join(',') && a2.path.join(',')!==a1.path.join(',')){
                     alt2 = buildResult(a2, 'Alternative 2');
                 }
             }
@@ -1116,7 +1231,7 @@ document.addEventListener('DOMContentLoaded', () => {
     map.on('load', () => { ensureRouteLayers(); updateLocationLayers(); try { map.setSky({ 'sky-color': '#87b8e8', 'horizon-color': '#f4efe6', 'fog-color': '#f4efe6', 'fog-ground-blend': 0.35 }); } catch {} });
     map.on('style.load', () => { routeLayersReady = false; ensureRouteLayers(); updateLocationLayers(); if (lastRouteData) drawRoutesOnMap(lastRouteData); });
     map.on('click', e => {
-        if (navigationPanel.hidden === false) return; // don't place pins while navigating
+        if (navigationPanel.hidden === false || document.body.classList.contains('navigating')) return; // locked during navigation: zoom/pan allowed, pins untouchable
         if (e.originalEvent.target.closest('.gpin, .map-style-switcher, .map-fabs, .map-legend-card, .route-info-panel, .maplibregl-ctrl, .navigation-panel')) return;
         const { lng, lat } = e.lngLat;
         if (!inBounds(lat, lng)) { showError('Selected point is outside Kathmandu Valley study boundary.'); return; }
@@ -1142,42 +1257,113 @@ document.addEventListener('DOMContentLoaded', () => {
         if (endLngLat) bounds.extend([endLngLat.lng, endLngLat.lat]);
         map.fitBounds(bounds, { padding: { top: 100, bottom: 150, left: 100, right: 100 }, pitch: is3D ? DEFAULT_PITCH : 0, bearing: DEFAULT_BEARING, duration: 1200, maxZoom: 16 });
     });
+    // ---- High-accuracy location lock (locate button) ----
+    // A single getCurrentPosition() usually returns the first coarse (network)
+    // fix, which can be 100+ m off. Instead we stream fixes for a few seconds
+    // and keep the most accurate one, so the dot settles onto the true position
+    // once the device GPS locks. maximumAge: 0 forces fresh satellite fixes
+    // (never a stale cached position).
+    let locateWatchId = null;
+    let locateTimer = null;
+    let locateBest = null;
+    let locateSawOob = false;
+    const LOCATE_GOOD_ENOUGH_M = 20;  // lock early once this accurate
+    const LOCATE_SETTLE_MS = 10000;   // max time to keep refining
+    const LOCATE_TIMEOUT_MS = 25000;  // per-fix give-up timeout
+
+    function clearLocateLock() {
+        if (locateWatchId !== null) {
+            try { navigator.geolocation.clearWatch(locateWatchId); } catch {}
+            locateWatchId = null;
+        }
+        if (locateTimer !== null) { clearTimeout(locateTimer); locateTimer = null; }
+    }
+    function revertLocateMode(btn) {
+        followMode = 'free';
+        if (btn) btn.classList.remove('follow', 'follow-heading');
+    }
+    function finishLocateLock(btn, reason) {
+        clearLocateLock();
+        if (!locateBest) {
+            if (locateSawOob) showError('Your location is outside the Kathmandu Valley study area.');
+            else showError('GPS unavailable — go outdoors with a clear sky view and try again.');
+            revertLocateMode(btn);
+            updateHint();
+            return;
+        }
+        const { lat, lon, accuracy, heading } = locateBest;
+        currentLocation = { lat, lon, accuracy };
+        updateLocationMarker(lat, lon, accuracy);
+        centerOnLocation(lat, lon, heading, 1000);
+        if (!startMarker) setStart(lat, lon, false);
+        else if (!endMarker) setEnd(lat, lon, false);
+        hideError();
+        mapHint.innerHTML = `<i class="fa-solid fa-location-crosshairs"></i><span>My location · GPS ±${Math.round(accuracy)} m${accuracy > 50 ? ' — go outdoors for better accuracy' : ''}</span>`;
+        mapHint.hidden = false;
+        if (reason === 'timeout' && accuracy > 50) {
+            showError(`Best GPS fix is ±${Math.round(accuracy)} m. Turn on High-accuracy location mode and go outdoors for better accuracy.`);
+        }
+        setTimeout(updateHint, 6000);
+        locateBest = null;
+        locateSawOob = false;
+    }
     document.getElementById('btn-locate').addEventListener('click', () => {
-        if (!navigator.geolocation) { showError('Geolocation is not supported.'); return; }
+        if (!navigator.geolocation) { showError('Geolocation is not supported on this device.'); return; }
+        const btn = document.getElementById('btn-locate');
+        // Tapping again while a lock is in progress cancels it.
+        if (locateWatchId !== null) { clearLocateLock(); locateBest = null; locateSawOob = false; revertLocateMode(btn); updateHint(); return; }
         // Cycle follow modes: free → follow → follow-heading → free
         if (followMode === 'free') followMode = 'follow';
         else if (followMode === 'follow') followMode = 'follow-heading';
         else followMode = 'free';
         // Update button visual state (add rotating indicator classes)
-        const btn = document.getElementById('btn-locate');
         btn.classList.remove('follow', 'follow-heading');
         if (followMode === 'follow') btn.classList.add('follow');
         else if (followMode === 'follow-heading') btn.classList.add('follow-heading');
-        // Request GPS position for the new mode
-        navigator.geolocation.getCurrentPosition(pos => {
-            const { latitude: lat, longitude: lng } = pos.coords;
-            if (!inBounds(lat, lng)) { showError('Your location is outside the Kathmandu Valley study area.'); // revert mode
-                // reset to free pan on error
-                followMode = 'free';
-                btn.classList.remove('follow', 'follow-heading');
+        if (followMode === 'free') { updateHint(); return; } // exited follow modes; no fix needed
+        // Fresh-fix-only lock (maximumAge: 0 = never use a stale cached position).
+        hideError();
+        locateBest = null;
+        locateSawOob = false;
+        mapHint.innerHTML = '<i class="fa-solid fa-satellite-dish"></i><span>Locking GPS… stay outdoors for best accuracy</span>';
+        mapHint.hidden = false;
+        const onFix = pos => {
+            const lat = pos.coords.latitude, lng = pos.coords.longitude;
+            const accuracy = pos.coords.accuracy || 9999;
+            if (!inBounds(lat, lng)) {
+                // Coarse warm-up fixes are often wrong — ignore out-of-area ones
+                // but keep waiting for the GPS to lock onto the true position.
+                locateSawOob = true;
                 return;
             }
-            currentLocation = { lat, lon: lng, accuracy: pos.coords.accuracy };
-            updateLocationMarker(lat, lng, pos.coords.accuracy);
-            centerOnLocation(lat, lng, pos.coords.heading, 1000);
-            if (!startMarker) setStart(lat, lng, false);
-            else if (!endMarker) setEnd(lat, lng, false);
-        }, err => {
-            let msg = 'GPS unavailable';
-            if (err.code === 1) msg = 'Location permission denied — allow access and try again';
-            else if (err.code === 2) msg = 'GPS unavailable — tap steps to navigate manually';
-            else if (err.code === 3) msg = 'GPS timeout — tap steps to navigate manually';
-            showError(msg);
-            // reset to free pan on error
-            followMode = 'free';
-            const b = document.getElementById('btn-locate');
-            b.classList.remove('follow', 'follow-heading');
-        }, { enableHighAccuracy: true, maximumAge: 10000, timeout: 15000 });
+            if (!locateBest || accuracy < locateBest.accuracy) {
+                const heading = (Number.isFinite(pos.coords.heading) && pos.coords.heading >= 0) ? pos.coords.heading : null;
+                locateBest = { lat, lon: lng, accuracy, heading };
+                currentLocation = { lat, lon: lng, accuracy };
+                updateLocationMarker(lat, lng, accuracy);
+                mapHint.innerHTML = `<i class="fa-solid fa-satellite-dish"></i><span>Locking GPS… ±${Math.round(accuracy)} m</span>`;
+                mapHint.hidden = false;
+                if (followMode !== 'free') centerOnLocation(lat, lng, heading, 800);
+                if (accuracy <= LOCATE_GOOD_ENOUGH_M) finishLocateLock(btn, 'locked');
+            }
+        };
+        const onFixError = err => {
+            // Permission denial fails fast; other errors keep waiting until the
+            // settle timer expires, then the best fix so far is used.
+            if (err && err.code === 1) {
+                clearLocateLock(); locateBest = null; locateSawOob = false;
+                showError('Location permission denied — allow access and try again.');
+                revertLocateMode(btn); updateHint();
+            }
+        };
+        try {
+            locateWatchId = navigator.geolocation.watchPosition(onFix, onFixError,
+                { enableHighAccuracy: true, maximumAge: 0, timeout: LOCATE_TIMEOUT_MS });
+        } catch (e) {
+            showError('Geolocation is not supported on this device.');
+            revertLocateMode(btn); updateHint(); return;
+        }
+        locateTimer = setTimeout(() => finishLocateLock(btn, 'timeout'), LOCATE_SETTLE_MS);
     });
     map.on('dragstart', () => { if (navigationPanel.hidden === false) followMode = 'free'; });
     btnReset.addEventListener('click', () => { resetRouting(); map.flyTo({ center: CENTER, zoom: DEFAULT_ZOOM, pitch: is3D ? DEFAULT_PITCH : 0, bearing: is3D ? DEFAULT_BEARING : 0, duration: 900 }); });
@@ -1192,9 +1378,22 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     closeRouteInfo.addEventListener('click', () => { routeInfoPanel.hidden = true; });
     document.getElementById('btn-stop-nav').addEventListener('click', stopNavigation);
+    // Manual reroute: rebuild the trip from the live GPS position on demand.
+    // (Auto-reroute only fires after joining the route; this is the explicit
+    // "take me from where I actually am" button.)
+    const btnRerouteNav = document.getElementById('btn-reroute-nav');
+    if (btnRerouteNav) btnRerouteNav.addEventListener('click', async () => {
+        if (!endLngLat) return;
+        if (!currentLocation) {
+            document.getElementById('nav-subtitle').textContent = 'Waiting for GPS… tap again in a moment';
+            return;
+        }
+        document.getElementById('nav-subtitle').textContent = 'Rerouting from your location…';
+        await rerouteFromLocation(currentLocation.lat, currentLocation.lon);
+    });
     btnNavigate.addEventListener('click', startNavigation);
 
-    if ('serviceWorker' in navigator) navigator.serviceWorker.register('/static/sw.js?v=3').catch(err => console.warn('Offline cache unavailable', err));
+    if ('serviceWorker' in navigator) navigator.serviceWorker.register('/static/sw.js?v=9').catch(err => console.warn('Offline cache unavailable', err));
     document.getElementById('card-astar').addEventListener('click', () => { if (lastRouteData && lastRouteData.astar) showRouteInfo('astar', lastRouteData.astar); });
     document.getElementById('card-dijkstra').addEventListener('click', () => { if (lastRouteData && lastRouteData.dijkstra) showRouteInfo('dijkstra', lastRouteData.dijkstra); });
     document.getElementById('card-astar').style.cursor = 'pointer';
@@ -1212,50 +1411,94 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function renderComparison(data){
         const cmpEl=document.getElementById('comparison-results');
+        if(!cmpEl) return;
         if(!data || !data.dijkstra || !data.astar){ cmpEl.style.display='none'; return; }
         cmpEl.style.display='block';
+        const set = (id, txt) => { const el = document.getElementById(id); if (el) el.textContent = txt; };
         const dDist=data.dijkstra.distance_km, aDist=data.astar.distance_km;
         const sameDist = dDist!==null && aDist!==null && Math.abs(dDist - aDist) < 0.001;
-        document.getElementById('cmp-distance-match').textContent = sameDist ? '✓ Same ('+dDist+' km)' : '✗ Different (D:'+dDist+' A:'+aDist+')';
-        document.getElementById('cmp-distance-match').style.color = sameDist ? '#10b981' : '#ef4444';
-        document.getElementById('cmp-astar-nodes').textContent = data.astar.nodes_explored;
-        document.getElementById('cmp-dijkstra-nodes').textContent = data.dijkstra.nodes_explored;
-        document.getElementById('cmp-astar-time').textContent = (data.astar.execution_time_seconds*1000).toFixed(1)+' ms';
-        document.getElementById('cmp-dijkstra-time').textContent = (data.dijkstra.execution_time_seconds*1000).toFixed(1)+' ms';
-        const speedup = data.dijkstra.execution_time_seconds / Math.max(0.0001, data.astar.execution_time_seconds);
+        set('cmp-distance-match', sameDist ? '✓ Same ('+dDist+' km)' : '✗ Different (D:'+dDist+' A:'+aDist+')');
+        const matchEl = document.getElementById('cmp-distance-match');
+        if (matchEl) matchEl.style.color = sameDist ? '#10b981' : '#ef4444';
+        set('cmp-dijkstra-distance', dDist!==null ? dDist+' km' : '—');
+        set('cmp-astar-distance', aDist!==null ? aDist+' km' : '—');
+        set('cmp-astar-nodes', data.astar.nodes_explored);
+        set('cmp-dijkstra-nodes', data.dijkstra.nodes_explored);
+        set('cmp-astar-path', data.astar.path_nodes_count + ' nodes');
+        set('cmp-dijkstra-path', data.dijkstra.path_nodes_count + ' nodes');
+        const aMs = data.astar.execution_time_ms !== undefined ? data.astar.execution_time_ms : (data.astar.execution_time_seconds*1000);
+        const dMs = data.dijkstra.execution_time_ms !== undefined ? data.dijkstra.execution_time_ms : (data.dijkstra.execution_time_seconds*1000);
+        set('cmp-astar-time', aMs.toFixed(1)+' ms');
+        set('cmp-dijkstra-time', dMs.toFixed(1)+' ms');
+        const speedup = dMs / Math.max(0.01, aMs);
         const exploredRatio = data.dijkstra.nodes_explored / Math.max(1, data.astar.nodes_explored);
-        document.getElementById('cmp-speedup').textContent = `A* ${speedup.toFixed(1)}× faster, ${exploredRatio.toFixed(1)}× fewer nodes`;
+        let reduction = 0;
+        if (data.dijkstra.nodes_explored > 0) reduction = (data.dijkstra.nodes_explored - data.astar.nodes_explored) / data.dijkstra.nodes_explored * 100;
+        if (data.comparison && data.comparison.speedup) {
+            set('cmp-speedup', `A* ${data.comparison.speedup}× faster`);
+            set('cmp-node-reduction', `${data.comparison.node_reduction_percent}% fewer nodes`);
+        } else {
+            set('cmp-speedup', `A* ${speedup.toFixed(1)}× faster, ${exploredRatio.toFixed(1)}× fewer nodes`);
+            set('cmp-node-reduction', `${reduction.toFixed(1)}% fewer nodes (A* vs Dijkstra)`);
+        }
+    }
+
+    function renderRouteStats(data) {
+        const panel = document.getElementById('route-stats-panel');
+        const body = document.getElementById('route-stats-body');
+        if (!panel || !body) return;
+        const rows = [];
+        function fmtTime(r) {
+            const ms = r.execution_time_ms !== undefined ? r.execution_time_ms : r.execution_time_seconds * 1000;
+            return ms.toFixed(1) + ' ms';
+        }
+        if (data.dijkstra) rows.push(['Dijkstra', 'row-dijkstra', data.dijkstra, fmtTime(data.dijkstra)]);
+        if (data.astar) rows.push(['A*', 'row-astar', data.astar, fmtTime(data.astar)]);
+        if (!rows.length) { panel.style.display = 'none'; return; }
+        body.innerHTML = rows.map(([name, cls, r, t]) =>
+            `<tr class="${cls}"><td>${name}</td><td>${r.distance_km !== null ? r.distance_km + ' km' : '—'}</td><td>${t}</td><td>${r.nodes_explored}</td><td>${r.path_nodes_count}</td><td>~${r.travel_time_minutes} min</td></tr>`
+        ).join('');
+        panel.style.display = 'block';
     }
 
     function renderRouteResult(data) {
         lastRouteData = data;
-        if (data.start_coords) { startLngLat = { lat: data.start_coords[0], lng: data.start_coords[1] }; if (startMarker) startMarker.setLngLat([startLngLat.lng, startLngLat.lat]); }
-        if (data.end_coords) { endLngLat = { lat: data.end_coords[0], lng: data.end_coords[1] }; if (endMarker) endMarker.setLngLat([endLngLat.lng, endLngLat.lat]); }
+        // During navigation the entered start/destination are locked: a
+        // mid-trip reroute refreshes the drawn route + steps from the live
+        // GPS position, but must never move the user's pins.
+        const locked = document.body.classList.contains('navigating');
+        if (!locked) {
+            if (data.start_coords) { startLngLat = { lat: data.start_coords[0], lng: data.start_coords[1] }; if (startMarker) startMarker.setLngLat([startLngLat.lng, startLngLat.lat]); }
+            if (data.end_coords) { endLngLat = { lat: data.end_coords[0], lng: data.end_coords[1] }; if (endMarker) endMarker.setLngLat([endLngLat.lng, endLngLat.lat]); }
+        }
         drawRoutesOnMap(data);
+        refreshSearchArea();
         const bounds = new maplibregl.LngLatBounds();
         ['dijkstra', 'astar', 'alt1', 'alt2'].forEach(k => { if (data[k] && data[k].path) data[k].path.forEach(c => bounds.extend([c[1], c[0]])); });
-        map.fitBounds(bounds, { padding: { top: 100, bottom: 150, left: 100, right: 100 }, pitch: is3D ? DEFAULT_PITCH : 0, bearing: DEFAULT_BEARING, duration: 1400, maxZoom: 16 });
+        if (!bounds.isEmpty()) map.fitBounds(bounds, { padding: { top: 100, bottom: 150, left: 100, right: 100 }, pitch: is3D ? DEFAULT_PITCH : 0, bearing: DEFAULT_BEARING, duration: 1400, maxZoom: 16 });
         distanceMarkers.forEach(m => m.remove()); distanceMarkers = [];
         if (data.astar && data.astar.path && data.astar.path.length > 0) createDistanceBubble(data.astar.path, ROUTE_COLORS.astar.line, `${data.astar.distance_km} km · A*`, 0.52);
         if (data.dijkstra && data.dijkstra.path && data.dijkstra.path.length > 0) createDistanceBubble(data.dijkstra.path, ROUTE_COLORS.dijkstra.line, `${data.dijkstra.distance_km} km · Dijkstra`, 0.25);
         if (data.alt1 && data.alt1.path && data.alt1.path.length > 0) createDistanceBubble(data.alt1.path, ROUTE_COLORS.alt1.line, `${data.alt1.distance_km} km`, 0.75);
         if (data.alt2 && data.alt2.path && data.alt2.path.length > 0) createDistanceBubble(data.alt2.path, ROUTE_COLORS.alt2.line, `${data.alt2.distance_km} km`, 0.85);
-        document.getElementById('summary-distance').innerText = `${data.astar.distance_km} km`;
-        document.getElementById('summary-time').innerText = `~${data.astar.travel_time_minutes} min`;
-        document.getElementById('summary-nodes').innerText = `${data.astar.path_nodes_count} nodes`;
-        document.getElementById('astar-distance').innerText = `${data.astar.distance_km} km`;
-        document.getElementById('dijkstra-distance').innerText = `${data.dijkstra.distance_km} km`;
-        document.getElementById('astar-time').innerText = `${(data.astar.execution_time_seconds * 1000).toFixed(1)} ms`;
-        document.getElementById('dijkstra-time').innerText = `${(data.dijkstra.execution_time_seconds * 1000).toFixed(1)} ms`;
-        document.getElementById('astar-nodes').innerText = data.astar.nodes_explored;
-        document.getElementById('dijkstra-nodes').innerText = data.dijkstra.nodes_explored;
-        document.getElementById('astar-travel').innerText = `~${data.astar.travel_time_minutes} min`;
-        document.getElementById('dijkstra-travel').innerText = `~${data.dijkstra.travel_time_minutes} min`;
+        const primary = data.astar || data.dijkstra;
+        document.getElementById('summary-distance').innerText = primary ? `${primary.distance_km} km` : '-';
+        document.getElementById('summary-time').innerText = primary ? `~${primary.travel_time_minutes} min` : '-';
+        document.getElementById('summary-nodes').innerText = primary ? `${primary.path_nodes_count} nodes` : '-';
+        document.getElementById('astar-distance').innerText = data.astar ? `${data.astar.distance_km} km` : '— (not run)';
+        document.getElementById('dijkstra-distance').innerText = data.dijkstra ? `${data.dijkstra.distance_km} km` : '— (not run)';
+        document.getElementById('astar-time').innerText = data.astar ? `${((data.astar.execution_time_ms !== undefined ? data.astar.execution_time_ms : data.astar.execution_time_seconds*1000)).toFixed(1)} ms` : '—';
+        document.getElementById('dijkstra-time').innerText = data.dijkstra ? `${((data.dijkstra.execution_time_ms !== undefined ? data.dijkstra.execution_time_ms : data.dijkstra.execution_time_seconds*1000)).toFixed(1)} ms` : '—';
+        document.getElementById('astar-nodes').innerText = data.astar ? data.astar.nodes_explored : '—';
+        document.getElementById('dijkstra-nodes').innerText = data.dijkstra ? data.dijkstra.nodes_explored : '—';
+        document.getElementById('astar-travel').innerText = data.astar ? `~${data.astar.travel_time_minutes} min` : '—';
+        document.getElementById('dijkstra-travel').innerText = data.dijkstra ? `~${data.dijkstra.travel_time_minutes} min` : '—';
         buildRouteToggles(data);
-        showRouteInfo('astar', data.astar);
+        renderRouteStats(data);
+        showRouteInfo(data.astar ? 'astar' : 'dijkstra', primary);
         resultsSection.style.display = 'block';
         renderComparison(data);
-        drawChart(data.astar.nodes_explored, data.dijkstra.nodes_explored);
+        drawChart(data.astar ? data.astar.nodes_explored : 0, data.dijkstra ? data.dijkstra.nodes_explored : 0);
         checkButtons();
     }
 
@@ -1265,34 +1508,198 @@ document.addEventListener('DOMContentLoaded', () => {
         chartInstance = new Chart(ctx, { type: 'bar', data: { labels: ['Nodes Explored'], datasets: [{ label: 'A*', data: [ae], backgroundColor: '#10b981', borderColor: '#059669', borderWidth: 1, borderRadius: 4 }, { label: 'Dijkstra', data: [de], backgroundColor: '#1d4ed8', borderColor: '#1e40af', borderWidth: 1, borderRadius: 4 }] }, options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: '#9ca3af', font: { family: 'Outfit', size: 11 } } }, title: { display: true, text: 'Algorithm Efficiency (Lower is Better)', color: '#f3f4f6', font: { family: 'Outfit', size: 12, weight: 'bold' } } }, scales: { y: { beginAtZero: true, ticks: { color: '#9ca3af' }, grid: { color: 'rgba(255,255,255,0.05)' } }, x: { ticks: { color: '#9ca3af' }, grid: { display: false } } } } });
     }
 
-    // ===== SEARCH =====
+    // ===== SEARCH (Google-Maps-style) =====
+    // Two sources, merged: (1) Nominatim full-text search bounded to the valley
+    // (covers ALL named places/roads, like Google's search box), (2) the app's
+    // own category API (futsal/cafes/clinics often missing from Nominatim).
     let startTimeout = null, endTimeout = null;
+    let startSearchToken = 0, endSearchToken = 0; // drop stale responses
+    let startAbort = null, endAbort = null;     // abort superseded requests
+    const SEARCH_TIMEOUT_MS = 12000;
+    let startActiveIdx = -1, endActiveIdx = -1;   // keyboard highlight
+    let startLastResults = [], endLastResults = [];
+    const MIN_SEARCH_CHARS = 2;
+
+    function escHtml(s) {
+        return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    }
+    function getRecents() {
+        try { const r = JSON.parse(localStorage.getItem('routeopt-recent') || '[]'); return Array.isArray(r) ? r : []; }
+        catch { return []; }
+    }
+    function saveRecent(name, lat, lon) {
+        try {
+            const recents = getRecents().filter(r => !(r.name === name && Math.abs(r.lat - lat) < 1e-4 && Math.abs(r.lon - lon) < 1e-4));
+            recents.unshift({ name, lat, lon, at: Date.now() });
+            localStorage.setItem('routeopt-recent', JSON.stringify(recents.slice(0, 6)));
+        } catch {}
+    }
+    async function unifiedSearch(query, limit = 8, signal = undefined) {
+        // Single backend call: valley-bounded full-text OSM search merged with
+        // the live venue-category search (futsal, cafes, clinics...).
+        const res = await fetch('/api/places/search/?q=' + encodeURIComponent(query) + '&limit=' + limit, { headers: { 'Accept-Language': 'en' }, signal });
+        if (!res.ok) return [];
+        const payload = await res.json();
+        const data = payload.success ? payload.data : [];
+        return (data || []).map(item => ({
+            name: String(item.name || item.display_name || 'Location'),
+            display_name: item.display_name || item.name,
+            short_addr: item.short_addr || '',
+            lat: parseFloat(item.lat), lon: parseFloat(item.lon),
+            category: item.category || '', type: item.type || '', source: item.source || 'osm'
+        })).filter(p => Number.isFinite(p.lat) && Number.isFinite(p.lon));
+    }
+    async function geocodeText(query, limit = 1) {
+        // Shared fallback for Find Route when the user typed text but never
+        // picked a suggestion.
+        try { const hits = await unifiedSearch(query, limit); if (hits.length) return hits[0]; } catch {}
+        return null;
+    }
+    function placeIcon(item) {
+        const t = ((item.type || '') + ' ' + (item.category || '')).toLowerCase();
+        if (/futsal|football|sport|pitch|stadium|ground/.test(t)) return 'fa-futbol';
+        if (/cafe|coffee|tea|bakery/.test(t)) return 'fa-mug-saucer';
+        if (/hospital|clinic|doctor|health|pharmacy/.test(t)) return 'fa-hospital';
+        if (/restaurant|food|fast_food|eat|dinner|cuisine/.test(t)) return 'fa-utensils';
+        if (/hotel|guest|hostel/.test(t)) return 'fa-bed';
+        if (/school|college|university|education/.test(t)) return 'fa-graduation-cap';
+        if (/temple|church|mosque|shrine|monastery|worship/.test(t)) return 'fa-place-of-worship';
+        if (/bank|atm/.test(t)) return 'fa-building-columns';
+        if (/road|highway|street|residential|tertiary|secondary|primary|path/.test(t)) return 'fa-road';
+        if (/railway|bus|station|airport|aerodrome/.test(t)) return 'fa-train-subway';
+        return 'fa-location-dot';
+    }
     function selectPlace(kind, lat, lon, name) {
         const input = kind === 'start' ? startInput : endInput;
         const results = kind === 'start' ? startResults : endResults;
         input.value = name; input.title = name + ' · ' + lat.toFixed(5) + ', ' + lon.toFixed(5);
         results.style.display = 'none'; results.innerHTML = '';
+        saveRecent(name, lat, lon);
         if (kind === 'start') setStart(lat, lon, true); else setEnd(lat, lon, true);
     }
+    function setActiveSearch(kind, idx, scroll) {
+        if (kind === 'start') startActiveIdx = idx; else endActiveIdx = idx;
+        const container = kind === 'start' ? startResults : endResults;
+        [...container.children].forEach((el, i) => el.classList.toggle('active', i === idx));
+        if (scroll && container.children[idx]) container.children[idx].scrollIntoView({ block: 'nearest' });
+    }
+    function moveActiveSearch(kind, dir) {
+        const results = kind === 'start' ? startLastResults : endLastResults;
+        if (!results.length) return;
+        let idx = (kind === 'start' ? startActiveIdx : endActiveIdx) + dir;
+        setActiveSearch(kind, Math.max(0, Math.min(results.length - 1, idx)), true);
+    }
+    function pickSearchResult(kind, i) {
+        const results = kind === 'start' ? startLastResults : endLastResults;
+        const item = results[i];
+        if (!item) return;
+        selectPlace(kind, item.lat, item.lon, item.name);
+    }
+    function renderSearchResults(container, kind, results, activeIdx) {
+        container.innerHTML = '';
+        if (!results.length) {
+            container.innerHTML = '<div class="search-item no-results"><i class="fa-solid fa-map-pin"></i><span>Not found? Click the map to drop a pin.</span></div>';
+            container.style.display = 'block';
+            return;
+        }
+        results.forEach((item, i) => {
+            const div = document.createElement('div');
+            div.className = 'search-item' + (i === activeIdx ? ' active' : '');
+            div.setAttribute('role', 'option');
+            if (item.recent) {
+                div.innerHTML = `<i class="fa-solid fa-clock-rotate-left"></i><span class="search-text"><span class="search-name">${escHtml(item.name)}</span></span>`;
+            } else {
+                div.innerHTML = `<i class="fa-solid ${placeIcon(item)}"></i><span class="search-text"><span class="search-name">${escHtml(item.name)}</span>` +
+                    (item.short_addr ? `<span class="search-addr">${escHtml(item.short_addr)}</span>` : '') +
+                    `</span>${item.source === 'local' ? '<span class="search-badge">Local</span>' : ''}`;
+            }
+            div.addEventListener('mousedown', e => { e.preventDefault(); e.stopPropagation(); pickSearchResult(kind, i); });
+            div.addEventListener('mousemove', () => setActiveSearch(kind, i, false));
+            container.appendChild(div);
+        });
+        container.style.display = 'block';
+    }
     function doSearch(query, container, kind) {
-        if (!query) { container.style.display = 'none'; return Promise.resolve([]); }
-        if (!navigator.onLine) { container.innerHTML = '<div class="search-item no-results">Offline — search unavailable. Click the map to set location.</div>'; container.style.display='block'; return Promise.resolve([]); }
-        return fetch('https://nominatim.openstreetmap.org/search?format=json&q=' + encodeURIComponent(query) + '&viewbox=85.15,27.82,85.55,27.55&bounded=1&limit=6&addressdetails=1', { headers: { 'Accept-Language': 'en' } })
-            .then(res => res.ok ? res.json() : [])
-            .then(data => {
-                if (data.length === 0) { container.innerHTML = '<div class="search-item no-results">No locations found in Kathmandu Valley</div>'; container.style.display = 'block'; return []; }
-                container.innerHTML = '';
-                data.forEach(item => {
-                    const name = item.display_name.split(',').slice(0, 3).join(',');
-                    const lat = parseFloat(item.lat), lon = parseFloat(item.lon);
-                    const div = document.createElement('div');
-                    div.className = 'search-item';
-                    div.innerHTML = '<i class="fa-solid fa-location-dot"></i><span>' + name + '</span>';
-                    div.addEventListener('mousedown', e => { e.preventDefault(); e.stopPropagation(); selectPlace(kind, lat, lon, name); });
-                    container.appendChild(div);
+        const token = (kind === 'start' ? ++startSearchToken : ++endSearchToken);
+        const setResults = r => { if (kind === 'start') startLastResults = r; else endLastResults = r; };
+        const q = (query || '').trim();
+        if (q.length < MIN_SEARCH_CHARS) { container.style.display = 'none'; setResults([]); setActiveSearch(kind, -1, false); return Promise.resolve([]); }
+        if (!navigator.onLine) {
+            // Recents keep search useful offline.
+            const recents = getRecents()
+                .filter(r => r.name.toLowerCase().includes(q.toLowerCase()))
+                .map(r => ({ ...r, recent: true }));
+            setResults(recents); setActiveSearch(kind, -1, false);
+            if (!recents.length) { container.innerHTML = '<div class="search-item no-results">Offline — pick a recent place or click the map.</div>'; container.style.display = 'block'; }
+            else renderSearchResults(container, kind, recents, -1);
+            return Promise.resolve(recents);
+        }
+        container.innerHTML = '<div class="search-item search-loading"><i class="fa-solid fa-spinner fa-spin"></i><span>Searching Kathmandu Valley…</span></div>';
+        container.style.display = 'block';
+        // Abort the previous in-flight request for this field so only the
+        // latest keystrokes consume bandwidth; a 12 s cap guarantees the
+        // spinner can never hang forever.
+        if (kind === 'start') { if (startAbort) startAbort.abort(); startAbort = new AbortController(); }
+        else { if (endAbort) endAbort.abort(); endAbort = new AbortController(); }
+        const signal = kind === 'start' ? startAbort.signal : endAbort.signal;
+        const timer = setTimeout(() => { try { (kind === 'start' ? startAbort : endAbort).abort(); } catch {} }, SEARCH_TIMEOUT_MS);
+        return unifiedSearch(q, 8, signal)
+            .then(results => {
+                clearTimeout(timer);
+                if ((kind === 'start' ? startSearchToken : endSearchToken) !== token) return null; // stale
+                setResults(results); setActiveSearch(kind, -1, false);
+                renderSearchResults(container, kind, results, -1);
+                return results;
+            })
+            .catch(err => {
+                clearTimeout(timer);
+                if ((kind === 'start' ? startSearchToken : endSearchToken) !== token) return []; // superseded
+                if (err && err.name === 'AbortError') {
+                    container.innerHTML = '<div class="search-item no-results"><i class="fa-solid fa-triangle-exclamation"></i><span>Search is taking too long — try fewer words, or click the map to drop a pin.</span></div>';
+                    container.style.display = 'block';
+                    return [];
+                }
+                console.error('Place search failed:', err); return [];
+            });
+    }
+    function showRecents(kind) {
+        // Focusing a field shows recent places (or fresh search for typed text).
+        const container = kind === 'start' ? startResults : endResults;
+        const input = kind === 'start' ? startInput : endInput;
+        if (input.value.trim().length >= MIN_SEARCH_CHARS) { doSearch(input.value.trim(), container, kind); return; }
+        const recents = getRecents().map(r => ({ ...r, recent: true }));
+        if (!recents.length) return;
+        if (kind === 'start') { startLastResults = recents; startActiveIdx = -1; }
+        else { endLastResults = recents; endActiveIdx = -1; }
+        renderSearchResults(container, kind, recents, -1);
+    }
+    function searchKeyHandler(e, kind) {
+        const container = kind === 'start' ? startResults : endResults;
+        const input = kind === 'start' ? startInput : endInput;
+        const results = kind === 'start' ? startLastResults : endLastResults;
+        const active = kind === 'start' ? startActiveIdx : endActiveIdx;
+        if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            if (container.style.display !== 'block' || !results.length) doSearch(input.value.trim(), container, kind);
+            else moveActiveSearch(kind, 1);
+        } else if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            moveActiveSearch(kind, -1);
+        } else if (e.key === 'Enter') {
+            e.preventDefault();
+            if (kind === 'start' && startTimeout) clearTimeout(startTimeout);
+            if (kind === 'end' && endTimeout) clearTimeout(endTimeout);
+            if (active >= 0 && results[active]) pickSearchResult(kind, active);
+            else {
+                const q = input.value.trim(); if (!q) return;
+                doSearch(q, container, kind).then(res => {
+                    const list = (res && res.length) ? res : (kind === 'start' ? startLastResults : endLastResults);
+                    if (list && list.length) selectPlace(kind, list[0].lat, list[0].lon, list[0].name);
                 });
-                container.style.display = 'block'; return data;
-            }).catch(err => { console.error('Geocoding failed:', err); return []; });
+            }
+        } else if (e.key === 'Escape') {
+            container.style.display = 'none';
+        }
     }
     startInput.addEventListener('input', e => {
         const q = e.target.value.trim();
@@ -1302,7 +1709,7 @@ document.addEventListener('DOMContentLoaded', () => {
         clearRoutes(); checkButtons(); updateHint();
         if (startTimeout) clearTimeout(startTimeout);
         if (!q) { startResults.style.display = 'none'; return; }
-        startTimeout = setTimeout(() => doSearch(q, startResults, 'start'), 350);
+        startTimeout = setTimeout(() => doSearch(q, startResults, 'start'), 300);
     });
     endInput.addEventListener('input', e => {
         const q = e.target.value.trim();
@@ -1312,22 +1719,12 @@ document.addEventListener('DOMContentLoaded', () => {
         clearRoutes(); checkButtons(); updateHint();
         if (endTimeout) clearTimeout(endTimeout);
         if (!q) { endResults.style.display = 'none'; return; }
-        endTimeout = setTimeout(() => doSearch(q, endResults, 'end'), 350);
+        endTimeout = setTimeout(() => doSearch(q, endResults, 'end'), 300);
     });
-    startInput.addEventListener('keydown', e => {
-        if (e.key === 'Enter') {
-            e.preventDefault(); if (startTimeout) clearTimeout(startTimeout);
-            const q = startInput.value.trim(); if (!q) return;
-            doSearch(q, startResults, 'start').then(results => { if (results && results.length>0) { const item=results[0]; const name=item.display_name.split(',').slice(0,3).join(','); selectPlace('start', parseFloat(item.lat), parseFloat(item.lon), name); } });
-        }
-    });
-    endInput.addEventListener('keydown', e => {
-        if (e.key === 'Enter') {
-            e.preventDefault(); if (endTimeout) clearTimeout(endTimeout);
-            const q = endInput.value.trim(); if (!q) return;
-            doSearch(q, endResults, 'end').then(results => { if (results && results.length>0) { const item=results[0]; const name=item.display_name.split(',').slice(0,3).join(','); selectPlace('end', parseFloat(item.lat), parseFloat(item.lon), name); } });
-        }
-    });
+    startInput.addEventListener('keydown', e => searchKeyHandler(e, 'start'));
+    endInput.addEventListener('keydown', e => searchKeyHandler(e, 'end'));
+    startInput.addEventListener('focus', () => showRecents('start'));
+    endInput.addEventListener('focus', () => showRecents('end'));
     clearStartBtn.addEventListener('click', () => { startInput.value=''; clearStartBtn.style.display='none'; startResults.style.display='none'; startLngLat=null; if(startMarker){startMarker.remove();startMarker=null;} checkButtons(); updateHint(); });
     clearEndBtn.addEventListener('click', () => { endInput.value=''; clearEndBtn.style.display='none'; endResults.style.display='none'; endLngLat=null; if(endMarker){endMarker.remove();endMarker=null;} checkButtons(); updateHint(); });
     document.addEventListener('mousedown', e => {
@@ -1342,17 +1739,20 @@ document.addEventListener('DOMContentLoaded', () => {
             if (!startLngLat || !endLngLat){ showError('Please set both a start and destination location.'); return; }
             hideError();
             ['dijkstra','astar','alt1','alt2'].forEach(k=>{ if(map.getSource('route-'+k)) map.getSource('route-'+k).setData(emptyLine()); });
+            ['dijkstra','astar'].forEach(k=>{ if(map.getSource('explored-'+k)) map.getSource('explored-'+k).setData(emptyPoints()); });
             resultsSection.style.display='none'; distanceMarkers.forEach(m=>m.remove()); distanceMarkers=[]; routeInfoPanel.hidden=true;
             loadingStepText.innerText='Finding nearest road nodes & computing routes...';
             loadingOverlay.classList.add('active');
             try{
                 let data;
+                const algorithm = getSelectedAlgorithm();
+                const includeExplored = showSearchArea;
                 const shouldUseOffline = useOfflineRouting || !navigator.onLine;
                 if(shouldUseOffline){
                     loadingStepText.innerText='Computing offline route (local Dijkstra/A*)...';
-                    data = await offlineRoute(startLngLat.lat, startLngLat.lng, endLngLat.lat, endLngLat.lng);
+                    data = await offlineRoute(startLngLat.lat, startLngLat.lng, endLngLat.lat, endLngLat.lng, includeExplored, algorithm === 'compare' ? 'both' : algorithm);
                 } else {
-                    const res = await fetch('/api/route/',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({start_lat:startLngLat.lat,start_lon:startLngLat.lng,end_lat:endLngLat.lat,end_lon:endLngLat.lng})});
+                    const res = await fetch('/api/route/',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({start_lat:startLngLat.lat,start_lon:startLngLat.lng,end_lat:endLngLat.lat,end_lon:endLngLat.lng,algorithm: algorithm === 'compare' ? 'both' : algorithm,include_explored:includeExplored})});
                     const j = await res.json();
                     if(!res.ok || !j.success) throw new Error(j.error||'Failed to compute route.');
                     data = j.data;
@@ -1360,15 +1760,91 @@ document.addEventListener('DOMContentLoaded', () => {
                 renderRouteResult(data);
             }catch(err){ showError(err.message); } finally { loadingOverlay.classList.remove('active'); }
         }
-        // If inputs have text but no pin, try to geocode them first
+        // If inputs have text but no pin, geocode them (Nominatim first, category API second).
         let needGeocode=false;
         const tasks=[];
-        if(!startLngLat && startQ){ needGeocode=true; tasks.push(fetch('https://nominatim.openstreetmap.org/search?format=json&q='+encodeURIComponent(startQ)+'&viewbox=85.15,27.82,85.55,27.55&bounded=1&limit=1').then(r=>r.json()).then(d=>{ if(d&&d[0]){ const n=d[0].display_name.split(',').slice(0,3).join(','); selectPlace('start', parseFloat(d[0].lat), parseFloat(d[0].lon), n); }}).catch(()=>{})); }
-        if(!endLngLat && endQ){ needGeocode=true; tasks.push(fetch('https://nominatim.openstreetmap.org/search?format=json&q='+encodeURIComponent(endQ)+'&viewbox=85.15,27.82,85.55,27.55&bounded=1&limit=1').then(r=>r.json()).then(d=>{ if(d&&d[0]){ const n=d[0].display_name.split(',').slice(0,3).join(','); selectPlace('end', parseFloat(d[0].lat), parseFloat(d[0].lon), n); }}).catch(()=>{})); }
+        if(!startLngLat && startQ){
+            needGeocode=true;
+            tasks.push(geocodeText(startQ, 1)
+                .then(item => {
+                    if (item) selectPlace('start', item.lat, item.lon, item.name);
+                })
+                .catch(() => {}));
+        }
+        if(!endLngLat && endQ){
+            needGeocode=true;
+            tasks.push(geocodeText(endQ, 1)
+                .then(item => {
+                    if (item) selectPlace('end', item.lat, item.lon, item.name);
+                })
+                .catch(() => {}));
+        }
         if(needGeocode){ loadingStepText.innerText='Locating places...'; loadingOverlay.classList.add('active'); await Promise.all(tasks); loadingOverlay.classList.remove('active'); if(!startLngLat || !endLngLat) { if(!startLngLat && startQ || !endLngLat && endQ) showError('Could not locate one or both places. Try clicking the map.'); return; } }
         proceed();
     });
 
     // init offline UI
     refreshOfflineUI();
+
+    // Algorithm selector + search-area toggle wiring (additive; defaults preserve old behaviour)
+    document.querySelectorAll('input[name="algorithm"]').forEach(r => {
+        r.addEventListener('change', () => { if (lastRouteData) renderRouteResult(lastRouteData); });
+    });
+    const searchToggle = document.getElementById('toggle-search-area');
+    if (searchToggle) {
+        searchToggle.addEventListener('change', async (e) => {
+            showSearchArea = e.target.checked;
+            if (showSearchArea && lastRouteData && (!lastRouteData.astar?.explored_coords && !lastRouteData.dijkstra?.explored_coords)) {
+                // Re-fetch current route with explored coords included.
+                try {
+                    btnCalculate.click();
+                } catch {}
+                return;
+            }
+            refreshSearchArea();
+        });
+    }
+
+    // Benchmark mode: run fixed Kathmandu Valley suite and render averages.
+    const btnBenchmark = document.getElementById('btn-run-benchmark');
+    if (btnBenchmark) {
+        btnBenchmark.addEventListener('click', async () => {
+            const statusEl = document.getElementById('benchmark-status');
+            const resultsEl = document.getElementById('benchmark-results');
+            const bodyEl = document.getElementById('benchmark-body');
+            const avgEl = document.getElementById('benchmark-averages');
+            btnBenchmark.disabled = true;
+            btnBenchmark.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Running...';
+            if (statusEl) { statusEl.style.display = 'block'; statusEl.textContent = 'Running Dijkstra vs A* on 6 real valley routes...'; }
+            if (resultsEl) resultsEl.style.display = 'none';
+            try {
+                const res = await fetch('/api/benchmark/');
+                const payload = await res.json();
+                if (!res.ok || !payload.success) throw new Error(payload.error || 'Benchmark failed.');
+                const { routes, averages } = payload.data;
+                if (bodyEl) {
+                    bodyEl.innerHTML = routes.map(r => {
+                        if (r.error) return `<tr><td>${r.name}</td><td colspan="8">Error: ${r.error}</td></tr>`;
+                        return `<tr><td>${r.name}</td><td>${r.dijkstra.distance_km} km</td><td>${r.astar.distance_km} km</td><td>${r.dijkstra.execution_time_ms} ms</td><td>${r.astar.execution_time_ms} ms</td><td>${r.dijkstra.nodes_explored}</td><td>${r.astar.nodes_explored}</td><td>${r.speedup}×</td><td>${r.node_reduction_percent}%</td></tr>`;
+                    }).join('');
+                }
+                if (avgEl) {
+                    avgEl.innerHTML =
+                        `<div class="benchmark-avg-card">Avg Dijkstra time<strong>${averages.avg_dijkstra_time_ms} ms</strong></div>` +
+                        `<div class="benchmark-avg-card">Avg A* time<strong>${averages.avg_astar_time_ms} ms</strong></div>` +
+                        `<div class="benchmark-avg-card">Avg Dijkstra nodes<strong>${averages.avg_dijkstra_nodes}</strong></div>` +
+                        `<div class="benchmark-avg-card">Avg A* nodes<strong>${averages.avg_astar_nodes}</strong></div>` +
+                        `<div class="benchmark-avg-card">Avg speedup<strong>${averages.avg_speedup}× (A*)</strong></div>` +
+                        `<div class="benchmark-avg-card">Avg node reduction<strong>${averages.avg_node_reduction_percent}%</strong></div>`;
+                }
+                if (resultsEl) resultsEl.style.display = 'block';
+                if (statusEl) statusEl.textContent = `Done — ${averages.successful_routes}/${averages.routes} routes · A* ${averages.avg_speedup}× faster on average.`;
+            } catch (err) {
+                if (statusEl) statusEl.textContent = 'Benchmark failed: ' + err.message;
+            } finally {
+                btnBenchmark.disabled = false;
+                btnBenchmark.innerHTML = '<i class="fa-solid fa-play"></i> Run Benchmark';
+            }
+        });
+    }
 });

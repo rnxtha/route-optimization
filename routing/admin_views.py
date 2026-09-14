@@ -16,9 +16,21 @@ from .graph.loader import GraphLoader
 
 @login_required(login_url='/admin/login/')
 def admin_dashboard(request):
-    """Admin dashboard showing system information"""
+    """Admin dashboard showing system information + basic algorithm stats."""
     # Get or create graph metadata
     metadata, created = GraphMetadata.objects.get_or_create(pk=1)
+
+    # Sync metadata file size / freshness from the on-disk graph cache.
+    try:
+        info = GraphLoader.get_graph_info()
+        if info.get('exists'):
+            metadata.file_size_mb = info.get('size_mb', metadata.file_size_mb)
+            if metadata.total_nodes == 0 and info.get('nodes'):
+                metadata.total_nodes = info['nodes']
+                metadata.total_edges = info.get('edges', 0)
+            metadata.save(update_fields=['file_size_mb', 'total_nodes', 'total_edges'])
+    except Exception:
+        info = {}
     
     # Calculate statistics
     now = timezone.now()
@@ -27,15 +39,54 @@ def admin_dashboard(request):
     
     stats_24h = RouteStatistic.objects.filter(created_at__gte=last_24h)
     stats_7d = RouteStatistic.objects.filter(created_at__gte=last_7d)
+
+    def _avg(qs, field):
+        return qs.aggregate(Avg(field))[f'{field}__avg'] or 0
+
+    d_avg_24 = _avg(stats_24h.filter(algorithm='dijkstra'), 'execution_time_ms')
+    a_avg_24 = _avg(stats_24h.filter(algorithm='astar'), 'execution_time_ms')
+    d_avg_7 = _avg(stats_7d.filter(algorithm='dijkstra'), 'execution_time_ms')
+    a_avg_7 = _avg(stats_7d.filter(algorithm='astar'), 'execution_time_ms')
+    d_nodes_7 = _avg(stats_7d.filter(algorithm='dijkstra'), 'nodes_explored')
+    a_nodes_7 = _avg(stats_7d.filter(algorithm='astar'), 'nodes_explored')
+
+    faster_24, speedup_24, reduction_24 = None, 0, 0
+    if d_avg_24 and a_avg_24:
+        if a_avg_24 < d_avg_24:
+            faster_24, speedup_24 = 'A*', d_avg_24 / a_avg_24
+        else:
+            faster_24, speedup_24 = 'Dijkstra', a_avg_24 / d_avg_24
+    d_nodes_24 = _avg(stats_24h.filter(algorithm='dijkstra'), 'nodes_explored')
+    a_nodes_24 = _avg(stats_24h.filter(algorithm='astar'), 'nodes_explored')
+    if d_nodes_24:
+        reduction_24 = round((d_nodes_24 - a_nodes_24) / d_nodes_24 * 100.0, 1)
+
+    faster_7d, speedup_7d, reduction_7d = None, 0, 0
+    if d_avg_7 and a_avg_7:
+        if a_avg_7 < d_avg_7:
+            faster_7d, speedup_7d = 'A*', d_avg_7 / a_avg_7
+        else:
+            faster_7d, speedup_7d = 'Dijkstra', a_avg_7 / d_avg_7
+    if d_nodes_7:
+        reduction_7d = round((d_nodes_7 - a_nodes_7) / d_nodes_7 * 100.0, 1)
     
     context = {
         'metadata': metadata,
+        'graph_info': info,
         'total_routes_24h': stats_24h.count(),
         'total_routes_7d': stats_7d.count(),
-        'dijkstra_avg_time_24h': stats_24h.filter(algorithm='dijkstra').aggregate(Avg('execution_time_ms'))['execution_time_ms__avg'] or 0,
-        'astar_avg_time_24h': stats_24h.filter(algorithm='astar').aggregate(Avg('execution_time_ms'))['execution_time_ms__avg'] or 0,
-        'dijkstra_avg_time_7d': stats_7d.filter(algorithm='dijkstra').aggregate(Avg('execution_time_ms'))['execution_time_ms__avg'] or 0,
-        'astar_avg_time_7d': stats_7d.filter(algorithm='astar').aggregate(Avg('execution_time_ms'))['execution_time_ms__avg'] or 0,
+        'dijkstra_avg_time_24h': d_avg_24,
+        'astar_avg_time_24h': a_avg_24,
+        'dijkstra_avg_time_7d': d_avg_7,
+        'astar_avg_time_7d': a_avg_7,
+        'dijkstra_avg_nodes_7d': d_nodes_7,
+        'astar_avg_nodes_7d': a_nodes_7,
+        'faster_algorithm_24h': faster_24,
+        'speedup_24h': speedup_24,
+        'node_reduction_24h': reduction_24,
+        'faster_algorithm_7d': faster_7d,
+        'speedup_7d': speedup_7d,
+        'node_reduction_7d': reduction_7d,
     }
     
     return render(request, 'admin/dashboard.html', context)
@@ -123,30 +174,39 @@ def upload_graph(request):
 @require_GET
 @login_required(login_url='/admin/login/')
 def rebuild_graph(request):
-    """API endpoint to rebuild the graph from the existing file"""
+    """API endpoint to rebuild the graph from the latest OpenStreetMap network."""
     try:
         metadata, _ = GraphMetadata.objects.get_or_create(pk=1)
         metadata.graph_status = 'loading'
-        metadata.status_message = 'Rebuilding graph...'
+        metadata.status_message = 'Rebuilding graph from latest map data...'
         metadata.save()
-        
+
         try:
-            # Force reload the graph
+            # Force reload the graph from the latest OSM snapshot
             RoutingService._graph = None
-            new_graph = RoutingService.get_graph()
-            
+            new_graph = RoutingService.get_graph(force_refresh=True)
+
             # Update metadata
+            import os as _os
             metadata.total_nodes = len(new_graph.nodes)
             metadata.total_edges = sum(len(edges) for edges in new_graph.adjacency_list.values())
+            try:
+                metadata.file_size_mb = round(_os.path.getsize(GraphLoader.get_cache_path()) / (1024 * 1024), 2)
+            except OSError:
+                pass
+            metadata.graph_source = GraphLoader.DATA_SOURCE
+            metadata.graph_region = "Kathmandu Valley (85.15,27.55 → 85.55,27.82)"
             metadata.graph_status = 'active'
-            metadata.status_message = 'Graph rebuilt successfully'
+            metadata.status_message = f'Graph rebuilt successfully from latest OSM data ({GraphLoader.GRAPH_VERSION})'
             metadata.save()
-            
+
             return JsonResponse({
                 'success': True,
-                'message': 'Graph rebuilt successfully',
+                'message': 'Graph rebuilt successfully from latest map data',
                 'nodes': metadata.total_nodes,
                 'edges': metadata.total_edges,
+                'file_size_mb': metadata.file_size_mb,
+                'graph_version': GraphLoader.GRAPH_VERSION,
             })
         except Exception as e:
             metadata.graph_status = 'error'
@@ -156,7 +216,7 @@ def rebuild_graph(request):
                 'success': False,
                 'error': f'Failed to rebuild graph: {str(e)}'
             }, status=500)
-    
+
     except Exception as e:
         return JsonResponse({'success': False, 'error': str(e)}, status=500)
 

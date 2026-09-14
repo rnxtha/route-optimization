@@ -32,10 +32,11 @@ class AStar(RouteAlgorithm):
                    penalized_edges: Optional[Set[Tuple[int, int]]] = None,
                    penalty_factor: float = 1.0) -> RouteResult:
         if start_node_id not in graph.nodes or end_node_id not in graph.nodes:
-            return RouteResult(path=[], distance=float('inf'), nodes_explored=0, execution_time=0.0)
+            return RouteResult(path=[], distance=float('inf'), nodes_explored=0, execution_time=0.0, visited_order=[])
 
         if start_node_id == end_node_id:
-            return RouteResult(path=[start_node_id], distance=0.0, nodes_explored=1, execution_time=0.0)
+            return RouteResult(path=[start_node_id], distance=0.0, nodes_explored=1, execution_time=0.0,
+                               visited_order=[start_node_id])
 
         start_time = time.perf_counter()
 
@@ -49,6 +50,7 @@ class AStar(RouteAlgorithm):
 
         parent = {}
         visited = set()
+        visited_order: List[int] = []
         pq = [(f_score[start_node_id], start_node_id)]
         nodes_explored = 0
 
@@ -59,6 +61,7 @@ class AStar(RouteAlgorithm):
                 continue
 
             visited.add(u)
+            visited_order.append(u)
             nodes_explored += 1
 
             if u == end_node_id:
@@ -90,7 +93,8 @@ class AStar(RouteAlgorithm):
         execution_time = time.perf_counter() - start_time
 
         if end_node_id not in g_score:
-            return RouteResult(path=[], distance=float('inf'), nodes_explored=nodes_explored, execution_time=execution_time)
+            return RouteResult(path=[], distance=float('inf'), nodes_explored=nodes_explored, execution_time=execution_time,
+                               visited_order=visited_order)
 
         path = []
         curr = end_node_id
@@ -104,5 +108,6 @@ class AStar(RouteAlgorithm):
             path=path,
             distance=g_score[end_node_id],
             nodes_explored=nodes_explored,
-            execution_time=execution_time
+            execution_time=execution_time,
+            visited_order=visited_order
         )

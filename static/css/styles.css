@@ -358,6 +358,8 @@ header {
 
 .gpin:hover { transform: scale(1.08); }
 .gpin:active { cursor: grabbing; transform: scale(0.95); }
+/* Locked pins during navigation: location untouchable, zoom still works. */
+body.navigating .gpin, body.navigating .gpin:hover, body.navigating .gpin:active { cursor: default; transform: none; }
 
 /* Map hint */
 .map-hint {
@@ -1400,6 +1402,9 @@ header {
 .nav-subtitle { font-size:0.75rem; opacity:0.85; }
 .btn-stop-nav { width:36px; height:36px; border-radius:50%; border:2px solid rgba(255,255,255,0.5); background: rgba(0,0,0,0.2); color:#fff; cursor:pointer; display:flex; align-items:center; justify-content:center; transition: all 0.2s; }
 .btn-stop-nav:hover { background: rgba(239,68,68,0.9); border-color:#fff; transform:scale(1.05); }
+.nav-actions { display:flex; gap:0.5rem; align-items:center; }
+.btn-reroute-nav { width:36px; height:36px; border-radius:50%; border:2px solid rgba(255,255,255,0.5); background: rgba(0,0,0,0.2); color:#fff; cursor:pointer; display:flex; align-items:center; justify-content:center; transition: all 0.2s; }
+.btn-reroute-nav:hover { background: rgba(59,130,246,0.9); border-color:#fff; transform:scale(1.05); }
 .nav-current-step { display:flex; align-items:center; gap:0.8rem; padding:1rem; background: rgba(255,255,255,0.06); border-bottom:1px solid var(--panel-border); }
 .nav-maneuver { width:48px; height:48px; border-radius:12px; background: #10b981; color:#fff; display:flex; align-items:center; justify-content:center; font-size:1.4rem; flex-shrink:0; box-shadow:0 4px 14px rgba(16,185,129,0.4); }
 .nav-instruction { flex:1; font-size:0.95rem; font-weight:600; color:#fff; line-height:1.4; }
@@ -1448,4 +1453,94 @@ header {
         max-height: min(70vh, 560px);
     }
 }
+
+/* ================= ALGORITHM SELECTOR + SEARCH AREA + STATS + BENCHMARK (additive) ================= */
+.algo-selector {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+    margin-top: 0.75rem;
+    padding: 0.55rem 0.7rem;
+    background: rgba(0,0,0,0.18);
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    font-size: 0.78rem;
+    color: var(--text-secondary);
+}
+.algo-selector-label { font-weight: 700; color: #e5e7eb; display: inline-flex; align-items: center; gap: 0.35rem; }
+.algo-option { display: inline-flex; align-items: center; gap: 0.3rem; cursor: pointer; color: #e5e7eb; font-weight: 600; }
+.algo-option input { accent-color: #10b981; cursor: pointer; }
+.search-area-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    margin-top: 0.6rem;
+    padding: 0.5rem 0.7rem;
+    background: rgba(16,185,129,0.06);
+    border: 1px solid rgba(16,185,129,0.2);
+    border-radius: 8px;
+    cursor: pointer;
+    position: relative;
+    padding-left: 3rem;
+    font-size: 0.78rem;
+    color: #e5e7eb;
+    font-weight: 600;
+}
+.search-area-toggle input { opacity: 0; width: 0; height: 0; position: absolute; }
+/* Dedicated slider class (NOT the shared .toggle-slider): fully self-contained
+   geometry so it can never stretch into a click-eating overlay, even if an
+   older cached stylesheet is ever applied. pointer-events:none makes it purely
+   decorative — the wrapping <label> handles all clicks natively. */
+.search-toggle-slider {
+    position: absolute;
+    left: 0.7rem;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 32px;
+    height: 18px;
+    background: rgba(255,255,255,0.15);
+    border-radius: 999px;
+    transition: background 0.25s ease;
+    pointer-events: none;
+    flex-shrink: 0;
+}
+.search-toggle-slider::before {
+    content: '';
+    position: absolute;
+    width: 14px;
+    height: 14px;
+    left: 2px;
+    top: 2px;
+    background: #fff;
+    border-radius: 50%;
+    transition: transform 0.25s ease;
+}
+.search-area-toggle input:checked + .search-toggle-slider { background: #10b981; }
+.search-area-toggle input:checked + .search-toggle-slider::before { transform: translateX(14px); }
+.search-area-label i { color: #10b981; margin-right: 0.2rem; }
+.route-stats-panel { margin-bottom: 1rem; background: rgba(0,0,0,0.18); border: 1px solid var(--panel-border); border-radius: 10px; padding: 0.7rem; }
+.stats-title { font-size: 0.85rem; font-weight: 700; color: #fff; margin-bottom: 0.5rem; display: flex; align-items: center; gap: 0.4rem; }
+.stats-title i { color: #10b981; }
+.stats-table { width: 100%; border-collapse: collapse; font-size: 0.72rem; }
+.stats-table th { text-align: left; color: var(--text-secondary); text-transform: uppercase; font-size: 0.6rem; letter-spacing: 0.4px; padding: 0.3rem 0.35rem; border-bottom: 1px solid var(--panel-border); }
+.stats-table td { padding: 0.35rem; border-bottom: 1px solid rgba(255,255,255,0.04); color: #e5e7eb; font-weight: 600; }
+.stats-table tr:last-child td { border-bottom: none; }
+.stats-table .row-dijkstra td:first-child { color: #93c5fd; }
+.stats-table .row-astar td:first-child { color: #6ee7b7; }
+.benchmark-status { margin-top: 0.6rem; font-size: 0.78rem; color: var(--text-secondary); }
+.benchmark-averages { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.4rem; margin: 0.7rem 0; }
+.benchmark-avg-card { background: rgba(16,185,129,0.08); border: 1px solid rgba(16,185,129,0.2); border-radius: 8px; padding: 0.5rem 0.6rem; font-size: 0.72rem; color: #e5e7eb; }
+.benchmark-avg-card strong { display: block; font-size: 0.95rem; color: #fff; }
+.benchmark-table-wrap { overflow-x: auto; max-height: 320px; overflow-y: auto; border: 1px solid var(--panel-border); border-radius: 8px; }
+.benchmark-table { min-width: 560px; }
+.comparison-hint { margin-top: 0.6rem; font-size: 0.7rem; color: var(--text-secondary); }
+/* Rich search suggestions (Google-style rows) */
+.search-item.active { background: rgba(59,130,246,0.18); color: #fff; }
+.search-item .search-text { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.3; }
+.search-item .search-name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.search-item .search-addr { font-size: 0.68rem; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.search-item .search-badge { margin-left: auto; align-self: center; font-size: 0.58rem; font-weight: 800; text-transform: uppercase; letter-spacing: 0.3px; background: rgba(16,185,129,0.15); color: #34d399; padding: 0.1rem 0.35rem; border-radius: 999px; flex-shrink: 0; }
+.search-item.search-loading { color: var(--text-secondary); cursor: default; }
+.search-item.search-loading i { color: #3b82f6; }
 

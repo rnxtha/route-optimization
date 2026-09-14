@@ -8,7 +8,7 @@
     <meta name="description" content="Offline-capable navigation for Kathmandu Valley with turn-by-turn directions, A* and Dijkstra routing on OSM road data.">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <link href="https://unpkg.com/maplibre-gl@5/dist/maplibre-gl.css" rel="stylesheet" />
-    <link rel="stylesheet" href="{% static 'css/styles.css' %}">
+    <link rel="stylesheet" href="{% static 'css/styles.css' %}?v=7">
     <link rel="manifest" href="{% static 'manifest.json' %}">
     <meta name="theme-color" content="#0f111a">
 </head>
@@ -40,6 +40,9 @@
                 </button>
                 <button role="tab" class="mode-tab" data-mode="compare" aria-selected="false">
                     <i class="fa-solid fa-chart-simple"></i> Compare
+                </button>
+                <button role="tab" class="mode-tab" data-mode="benchmark" aria-selected="false">
+                    <i class="fa-solid fa-gauge-high"></i> Benchmark
                 </button>
                 <button role="tab" class="mode-tab" data-mode="offline" aria-selected="false">
                     <i class="fa-solid fa-download"></i> Offline Maps
@@ -100,6 +103,19 @@
                         </button>
                     </div>
 
+                    <div class="algo-selector" role="radiogroup" aria-label="Routing algorithm">
+                        <span class="algo-selector-label"><i class="fa-solid fa-microchip"></i> Algorithm</span>
+                        <label class="algo-option"><input type="radio" name="algorithm" value="astar" checked> A*</label>
+                        <label class="algo-option"><input type="radio" name="algorithm" value="dijkstra"> Dijkstra</label>
+                        <label class="algo-option"><input type="radio" name="algorithm" value="both"> Compare Both</label>
+                    </div>
+
+                    <label class="search-area-toggle">
+                        <input type="checkbox" id="toggle-search-area">
+                        <span class="search-toggle-slider" aria-hidden="true"></span>
+                        <span class="search-area-label"><i class="fa-solid fa-circle-dot"></i> Show Search Area (explored nodes)</span>
+                    </label>
+
                     <div class="button-row" style="margin-top: 0.5rem;">
                         <button class="btn btn-success" id="btn-navigate" disabled style="display: none;">
                             <i class="fa-solid fa-location-arrow"></i> Start Navigation
@@ -134,6 +150,16 @@
                     </div>
 
                     <div class="route-toggle-group" id="route-toggle-group"></div>
+
+                    <div class="route-stats-panel" id="route-stats-panel" style="display: none;">
+                        <div class="stats-title"><i class="fa-solid fa-table-list"></i> Route Statistics</div>
+                        <table class="stats-table">
+                            <thead>
+                                <tr><th>Algorithm</th><th>Distance</th><th>Exec Time</th><th>Explored</th><th>Path Nodes</th><th>Travel</th></tr>
+                            </thead>
+                            <tbody id="route-stats-body"></tbody>
+                        </table>
+                    </div>
 
                     <div class="results-wrapper">
                         <div class="algo-card astar" id="card-astar">
@@ -214,12 +240,28 @@
                             <span class="comparison-value" id="cmp-distance-match">-</span>
                         </div>
                         <div class="comparison-metric">
+                            <span class="comparison-label">Dijkstra Distance</span>
+                            <span class="comparison-value" id="cmp-dijkstra-distance">-</span>
+                        </div>
+                        <div class="comparison-metric">
+                            <span class="comparison-label">A* Distance</span>
+                            <span class="comparison-value" id="cmp-astar-distance">-</span>
+                        </div>
+                        <div class="comparison-metric">
                             <span class="comparison-label">A* Nodes Explored</span>
                             <span class="comparison-value" id="cmp-astar-nodes">-</span>
                         </div>
                         <div class="comparison-metric">
                             <span class="comparison-label">Dijkstra Nodes Explored</span>
                             <span class="comparison-value" id="cmp-dijkstra-nodes">-</span>
+                        </div>
+                        <div class="comparison-metric">
+                            <span class="comparison-label">A* Path Nodes</span>
+                            <span class="comparison-value" id="cmp-astar-path">-</span>
+                        </div>
+                        <div class="comparison-metric">
+                            <span class="comparison-label">Dijkstra Path Nodes</span>
+                            <span class="comparison-value" id="cmp-dijkstra-path">-</span>
                         </div>
                         <div class="comparison-metric">
                             <span class="comparison-label">A* Exec Time</span>
@@ -232,6 +274,44 @@
                         <div class="comparison-metric">
                             <span class="comparison-label">Speedup Factor</span>
                             <span class="comparison-value" id="cmp-speedup">-</span>
+                        </div>
+                        <div class="comparison-metric">
+                            <span class="comparison-label">Node Reduction</span>
+                            <span class="comparison-value" id="cmp-node-reduction">-</span>
+                        </div>
+                        <div class="comparison-hint">Tip: set Start & Destination in the Route tab, pick “Compare Both”, then Find Route.</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- BENCHMARK MODE PANEL -->
+            <div class="mode-panel" id="panel-benchmark" role="tabpanel" style="display: none;">
+                <div class="sidebar-section">
+                    <div class="section-title">
+                        <i class="fa-solid fa-gauge-high"></i>
+                        <span>Benchmark — Dijkstra vs A*</span>
+                    </div>
+                    <div class="comparison-explainer">
+                        <p style="font-size: 0.8rem; color: var(--text-secondary); line-height: 1.5;">
+                            Runs both algorithms over several real Kathmandu Valley routes
+                            (Thamel → Patan, Airport → Bhaktapur, Kalanki → Chabahil, …)
+                            and averages distance, execution time, nodes explored, speedup,
+                            and node reduction.
+                        </p>
+                    </div>
+                    <button class="btn btn-primary" id="btn-run-benchmark">
+                        <i class="fa-solid fa-play"></i> Run Benchmark
+                    </button>
+                    <div id="benchmark-status" class="benchmark-status" style="display: none;"></div>
+                    <div id="benchmark-results" style="display: none;">
+                        <div class="benchmark-averages" id="benchmark-averages"></div>
+                        <div class="benchmark-table-wrap">
+                            <table class="stats-table benchmark-table">
+                                <thead>
+                                    <tr><th>Route</th><th>D Dist</th><th>A Dist</th><th>D Time</th><th>A Time</th><th>D Nodes</th><th>A Nodes</th><th>Speedup</th><th>Reduction</th></tr>
+                                </thead>
+                                <tbody id="benchmark-body"></tbody>
+                            </table>
                         </div>
                     </div>
                 </div>
@@ -317,6 +397,14 @@
                     <div class="legend-color" style="background: #1d4ed8;"></div>
                     <span>Dijkstra</span>
                 </div>
+                <div class="legend-item" id="legend-search-dijkstra" style="display:none;">
+                    <div class="legend-color" style="background: rgba(29,78,216,0.4);"></div>
+                    <span>Dijkstra search area</span>
+                </div>
+                <div class="legend-item" id="legend-search-astar" style="display:none;">
+                    <div class="legend-color" style="background: rgba(16,185,129,0.4);"></div>
+                    <span>A* search area</span>
+                </div>
                 <div class="legend-item" id="legend-alt1" style="display:none;">
                     <div class="legend-color" style="background: #f97316; background-image: repeating-linear-gradient(90deg, transparent 0 6px, rgba(255,255,255,0.4) 6px 9px);"></div>
                     <span>Alternative 1</span>
@@ -346,9 +434,14 @@
                             <div class="nav-subtitle" id="nav-subtitle">Starting...</div>
                         </div>
                     </div>
-                    <button id="btn-stop-nav" class="btn-stop-nav" title="Stop Navigation">
-                        <i class="fa-solid fa-stop"></i>
-                    </button>
+                    <div class="nav-actions">
+                        <button id="btn-reroute-nav" class="btn-reroute-nav" title="Reroute from my location">
+                            <i class="fa-solid fa-rotate"></i>
+                        </button>
+                        <button id="btn-stop-nav" class="btn-stop-nav" title="Stop Navigation">
+                            <i class="fa-solid fa-stop"></i>
+                        </button>
+                    </div>
                 </div>
 
                 <div class="nav-current-step" id="nav-current-step">
@@ -399,6 +492,6 @@
 
     <script src="https://unpkg.com/maplibre-gl@5/dist/maplibre-gl.js"></script>
     <script src="{% static 'js/chart.js' %}"></script>
-    <script src="{% static 'js/app.js' %}"></script>
+    <script src="{% static 'js/app.js' %}?v=9"></script>
 </body>
 </html>

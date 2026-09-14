@@ -1,8 +1,8 @@
-const CACHE_NAME = 'routeopt-offline-v3';
+const CACHE_NAME = 'routeopt-offline-v9';
 const APP_SHELL = [
     '/',
-    '/static/css/styles.css',
-    '/static/js/app.js',
+    '/static/css/styles.css?v=7',
+    '/static/js/app.js?v=9',
     '/static/js/chart.js',
     '/static/js/leaflet.js',
     '/static/css/leaflet.css',

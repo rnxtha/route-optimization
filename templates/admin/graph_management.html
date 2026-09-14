@@ -84,7 +84,8 @@
                 <h5 style="margin: 0;">Rebuild Graph</h5>
             </div>
             <div class="card-body">
-                <p>Reload and rebuild the graph from the current graph file without uploading a new one.</p>
+                <p>Download the <strong>latest OpenStreetMap snapshot</strong> for Kathmandu Valley (85.15,27.55 → 85.55,27.82) and rebuild the routing graph, so recently added roads and places are included. The rebuilt graph is immediately served by <code>/api/graph/download/</code> for offline use.</p>
+                <p class="text-muted"><small>Source: OpenStreetMap via Overpass mirrors (no Google Maps data is copied — Google Maps is only a visual reference for spotting missing places such as futsal grounds, cafés, restaurants, or hospitals, which editors then add to OSM).</small></p>
                 <button type="button" class="btn btn-success" id="rebuildBtn" onclick="rebuildGraph()">
                     🔄 Rebuild Graph
                 </button>

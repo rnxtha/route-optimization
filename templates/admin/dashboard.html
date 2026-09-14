@@ -38,6 +38,7 @@
                 {% endif %}
                 <div class="mt-2 text-muted">
                     <small>Last updated: <strong>{{ metadata.last_updated|date:"M d, Y H:i" }}</strong></small>
+                    {% if graph_info.last_built %}<br><small>Graph file built: <strong>{{ graph_info.last_built }}</strong> · version <strong>{{ graph_info.cached_version|default:graph_info.version }}</strong> · source: {{ graph_info.source }}</small>{% endif %}
                 </div>
             </div>
         </div>
@@ -113,6 +114,40 @@
                         <td>{{ metadata.last_updated|date:"M d, Y H:i:s" }}</td>
                     </tr>
                 </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row mt-4">
+    <div class="col-md-12">
+        <div class="card">
+            <div class="card-header" style="background-color: #8e44ad; color: white;">
+                <h5 style="margin: 0;">Algorithm Statistics (basic)</h5>
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-6">
+                        <h6>Last 24 hours</h6>
+                        <table class="table table-sm">
+                            <tr><td><strong>Total route calculations:</strong></td><td>{{ total_routes_24h }}</td></tr>
+                            <tr><td><strong>Avg Dijkstra nodes explored:</strong></td><td>{{ dijkstra_avg_nodes_7d|floatformat:0 }} (7d ref)</td></tr>
+                            <tr><td><strong>Faster algorithm:</strong></td><td>{% if faster_algorithm_24h %}{{ faster_algorithm_24h }} ({{ speedup_24h|floatformat:2 }}×){% else %}—{% endif %}</td></tr>
+                            <tr><td><strong>A* node reduction:</strong></td><td>{{ node_reduction_24h|floatformat:1 }}%</td></tr>
+                        </table>
+                    </div>
+                    <div class="col-md-6">
+                        <h6>Last 7 days</h6>
+                        <table class="table table-sm">
+                            <tr><td><strong>Total route calculations:</strong></td><td>{{ total_routes_7d }}</td></tr>
+                            <tr><td><strong>Avg Dijkstra nodes:</strong></td><td>{{ dijkstra_avg_nodes_7d|floatformat:0 }}</td></tr>
+                            <tr><td><strong>Avg A* nodes:</strong></td><td>{{ astar_avg_nodes_7d|floatformat:0 }}</td></tr>
+                            <tr><td><strong>Faster algorithm:</strong></td><td>{% if faster_algorithm_7d %}{{ faster_algorithm_7d }} ({{ speedup_7d|floatformat:2 }}×){% else %}—{% endif %}</td></tr>
+                            <tr><td><strong>A* node reduction:</strong></td><td>{{ node_reduction_7d|floatformat:1 }}%</td></tr>
+                        </table>
+                        <a href="{% url 'admin_panel:statistics' %}" class="btn btn-sm btn-info">Full statistics →</a>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
